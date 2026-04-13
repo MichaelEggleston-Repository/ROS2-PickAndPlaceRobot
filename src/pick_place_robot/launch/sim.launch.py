@@ -9,12 +9,12 @@ import os
 def generate_launch_description():
     pkg_share = get_package_share_directory("pick_place_robot")
     world = os.path.join(pkg_share, "worlds", "my_world.sdf")
-    controllers = os.path.join(pkg_share, "config", "panda_controllers.yaml")
+    panda_urdf = os.path.join(pkg_share, "urdf", "panda.urdf")
 
     ros_gz_sim_share = get_package_share_directory("ros_gz_sim")
     gz_launch = os.path.join(ros_gz_sim_share, "launch", "gz_sim.launch.py")
 
-    with open("/tmp/panda.urdf", "r", encoding="utf-8") as f:
+    with open(panda_urdf, "r", encoding="utf-8") as f:
         robot_description = f.read()
 
     robot_state_publisher = Node(
@@ -56,7 +56,7 @@ def generate_launch_description():
                     "ros2", "run", "ros_gz_sim", "create",
                     "-world", "my_world",
                     "-name", "panda",
-                    "-file", "/tmp/panda.urdf",
+                    "-file", panda_urdf,
                     "-x", "0.0",
                     "-y", "0.6",
                     "-z", "0.0",
@@ -121,7 +121,7 @@ def generate_launch_description():
     return LaunchDescription([
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(gz_launch),
-            launch_arguments={"gz_args": world}.items(),
+            launch_arguments={"gz_args": f"-r {world}"}.items(),
         ),
         robot_state_publisher,
         camera_info_bridge,

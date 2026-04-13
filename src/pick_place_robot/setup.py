@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
         (os.path.join("share", package_name, "worlds"), glob("worlds/*.sdf")),
-        #(os.path.join("share", "pick_place_robot", "config"), glob("config/*.yaml")),
+        (os.path.join("share", package_name, "urdf"), glob("urdf/*.urdf")),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +29,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            "panda_home = pick_place_robot.panda_home:main",
+            "panda_gripper = pick_place_robot.panda_gripper:main",
         ],
     },
 )
