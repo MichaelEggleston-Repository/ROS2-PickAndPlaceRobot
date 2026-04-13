@@ -6,7 +6,7 @@ from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 # Home pose values are kept as constants so they are easy to tune later.
-HOME_JOINT_POSITIONS = [0.0, -0.4, 0.0, -2.0, 0.0, 1.6, 0.8]
+HOME_JOINT_POSITIONS = [-1.5708, -0.4, 0.0, -2.0, 0.0, 1.6, 0.8]
 HOME_MOVE_DURATION_SEC = 5
 
 # Keep the joint ordering in one place so every goal uses the same mapping.
