@@ -29,8 +29,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            "panda_home = pick_place_robot.panda_home:main",
-            "panda_gripper = pick_place_robot.panda_gripper:main",
+            "panda_coordinator = pick_place_robot.panda_coordinator:main",
+            "panda_arm_test = pick_place_robot.panda_arm_control:main",
+            "panda_gripper_test = pick_place_robot.panda_gripper_control:main",
         ],
     },
 )
