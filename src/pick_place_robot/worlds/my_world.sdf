@@ -200,7 +200,7 @@
 
     <model name="cube_1">
       <static>false</static>
-      <pose>-0.4 0 0.425 0 0 0</pose>
+      <pose>-0.15 0 0.425 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.1</mass>

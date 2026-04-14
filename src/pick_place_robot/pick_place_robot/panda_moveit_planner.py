@@ -6,8 +6,6 @@ import math
 from moveit.planning import MoveItPy
 
 from geometry_msgs.msg import Pose, PoseStamped
-from moveit_msgs.msg import CollisionObject, PlanningScene
-from shape_msgs.msg import SolidPrimitive
 
 from pick_place_robot.moveit_config_loader import build_moveit_config_dict
 from pick_place_robot.task_space_pose import TaskSpacePose
@@ -31,118 +29,33 @@ class PlanningResult:
     joint_positions: list[float] | None
     message: str
 
-class PandaMoveItPlanner(Node):
-    def __init__(self):
+class PandaMoveItPlanner:
+    def __init__(self, node: Node):
         """
-        Create a Panda MoveIt planner node and initialize MoveItPy.
+        Create a Panda MoveIt planner helper and initialize MoveItPy.
 
         Inputs:
-            None
+            node: ROS 2 node used for logging and lifecycle ownership.
 
         Returns:
             None
         """
-        super().__init__("panda_moveit_planner")
 
-        self.get_logger().info("Loading MoveIt configuration.")
+        self._node = node
+
+        self._node.get_logger().info("Loading MoveIt configuration.")
         moveit_config = build_moveit_config_dict()
 
-        self.get_logger().info("About to initialize MoveItPy.")
+        self._node.get_logger().info("About to initialize MoveItPy.")
         self._moveit = MoveItPy(
             node_name="moveit_py",
             config_dict=moveit_config,
         )
-        self.get_logger().info("MoveItPy initialized successfully.")
+        self._node.get_logger().info("MoveItPy initialized successfully.")
 
         # The planner owns planning components, not config assembly details.
         self._arm = self._moveit.get_planning_component(ARM_GROUP_NAME)
-        self.get_logger().info("Planning component for Panda arm is ready.")
-
-        self._planning_scene_publisher = self.create_publisher(
-            PlanningScene,
-            "/planning_scene",
-            10,
-        )
-        self.get_logger().info("Planning scene publisher is ready.")
-
-        self.add_static_environment()
-
-    def add_box_collision_object(
-        self,
-        object_id: str,
-        size_xyz: tuple[float, float, float],
-        position_xyz: tuple[float, float, float],
-        frame_id: str = "panda_link0",
-    ) -> None:
-        """
-        Add a box-shaped collision object to the MoveIt planning scene.
-
-        Inputs:
-            object_id: Unique name for the collision object.
-            size_xyz: Box dimensions in meters as (x, y, z).
-            position_xyz: Box center position in meters as (x, y, z).
-            frame_id: Frame in which the box pose is defined.
-
-        Returns:
-            None
-        """
-        primitive = SolidPrimitive()
-        primitive.type = SolidPrimitive.BOX
-        primitive.dimensions = list(size_xyz)
-
-        pose = Pose()
-        pose.position.x = position_xyz[0]
-        pose.position.y = position_xyz[1]
-        pose.position.z = position_xyz[2]
-        pose.orientation.w = 1.0
-
-        collision_object = CollisionObject()
-        collision_object.header.frame_id = frame_id
-        collision_object.id = object_id
-        collision_object.primitives.append(primitive)
-        collision_object.primitive_poses.append(pose)
-        collision_object.operation = CollisionObject.ADD
-
-        planning_scene = PlanningScene()
-        planning_scene.is_diff = True
-        planning_scene.world.collision_objects.append(collision_object)
-
-        self._planning_scene_publisher.publish(planning_scene)
-
-        self.get_logger().info(
-            f"Added collision object '{object_id}' in frame '{frame_id}' "
-            f"with size {size_xyz} at position {position_xyz}."
-        )
-
-    def add_static_environment(self) -> None:
-        """
-        Add the fixed environment collision objects to the MoveIt planning scene.
-
-        Inputs:
-            None
-
-        Returns:
-            None
-        """
-        self.add_box_collision_object(
-            object_id="conveyor_base",
-            size_xyz=(2.0, 0.6, 0.4),
-            position_xyz=(0.0, 0.0, 0.2),
-            frame_id="world",
-        )
-
-    def republish_static_environment(self) -> None:
-        """
-        Republish the fixed environment collision objects to the MoveIt planning scene.
-
-        Inputs:
-            None
-
-        Returns:
-            None
-        """
-        self.get_logger().info("Republishing static environment collision objects.")
-        self.add_static_environment()
+        self._node.get_logger().info("Planning component for Panda arm is ready.")
 
     def log_requested_pose(self, pose) -> None:
         """
@@ -154,7 +67,7 @@ class PandaMoveItPlanner(Node):
         Returns:
             None
         """
-        self.get_logger().info(
+        self._node.get_logger().info(
             "Planning request received for task pose: "
             f"x={pose.x:.3f}, y={pose.y:.3f}, z={pose.z:.3f}, "
             f"roll={pose.roll:.3f}, pitch={pose.pitch:.3f}, yaw={pose.yaw:.3f}"
@@ -240,7 +153,7 @@ class PandaMoveItPlanner(Node):
 
         target_pose = self.create_pose_target(pose)
 
-        self.get_logger().info(
+        self._node.get_logger().info(
             "Created pose target in frame "
             f"'{target_pose.header.frame_id}': "
             f"x={target_pose.pose.position.x:.3f}, "
@@ -302,17 +215,16 @@ class PandaMoveItPlanner(Node):
             yaw=0.0,
         )
 
-        self.get_logger().info("Starting planner smoke test...")
-        self.republish_static_environment()
+        self._node.get_logger().info("Starting planner smoke test...")
         result = self.plan_to_task_pose(test_pose)
 
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
-        self.get_logger().info(
+        self._node.get_logger().info(f"Planning success: {result.success}")
+        self._node.get_logger().info(f"Planning message: {result.message}")
+        self._node.get_logger().info(
             "Joint positions returned: "
             f"{result.joint_positions is not None}"
         )
-        self.get_logger().info(f"Returned joint positions: {result.joint_positions}")
+        self._node.get_logger().info(f"Returned joint positions: {result.joint_positions}")
         
 def main(args=None):
     """
@@ -325,10 +237,11 @@ def main(args=None):
         None
     """
     rclpy.init(args=args)
-    node = PandaMoveItPlanner()
+    node = Node("planner_test_node")
+    planner = PandaMoveItPlanner(node)
 
     try:
-        node.run_planning_smoke_test()
+        planner.run_planning_smoke_test()
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pick_place_robot.panda_arm_control import PandaArmControl
 from pick_place_robot.panda_gripper_control import PandaGripperControl
 from pick_place_robot.panda_moveit_planner import PandaMoveItPlanner
+from pick_place_robot.panda_scene_planning import PandaPlanningScene
 from pick_place_robot.task_space_pose import TaskSpacePose
 
 class PandaCoordinatorNode(Node):
@@ -24,7 +25,9 @@ class PandaCoordinatorNode(Node):
         # Attach reusable control objects to this coordinator node.
         self._arm = PandaArmControl(self)
         self._gripper = PandaGripperControl(self)
-        self._planner = PandaMoveItPlanner()
+        self._scene = PandaPlanningScene(self)
+        self._planner = PandaMoveItPlanner(self)
+        
 
     def wait_for_control_servers(self) -> bool:
         """
@@ -260,8 +263,8 @@ class PandaCoordinatorNode(Node):
         """
         cube_1_top_pose = TaskSpacePose(
             x=0.600,
-            y=-0.400,
-            z=0.450,
+            y=-0.15,
+            z=0.5,
             roll=3.14159,
             pitch=0.0,
             yaw=0.0,
@@ -270,7 +273,7 @@ class PandaCoordinatorNode(Node):
         cube_2_top_pose = TaskSpacePose(
             x=0.500,
             y=0.000,
-            z=0.450,
+            z=0.5,
             roll=3.14159,
             pitch=0.0,
             yaw=0.0,
@@ -279,7 +282,7 @@ class PandaCoordinatorNode(Node):
         cube_3_top_pose = TaskSpacePose(
             x=0.550,
             y=0.250,
-            z=0.450,
+            z=0.5,
             roll=3.14159,
             pitch=0.0,
             yaw=0.0,
@@ -287,7 +290,10 @@ class PandaCoordinatorNode(Node):
 
         self.get_logger().info("Starting cube top pose test...")
 
-        self._planner.republish_static_environment()
+        self._scene.republish_static_environment()
+        self._scene.add_cube_1_collision_object()
+        self._scene.add_cube_2_collision_object()
+        self._scene.add_cube_3_collision_object()
 
         self.get_logger().info("Testing cube_1 top pose...")
         if not self.plan_and_move_to_pose(cube_1_top_pose):

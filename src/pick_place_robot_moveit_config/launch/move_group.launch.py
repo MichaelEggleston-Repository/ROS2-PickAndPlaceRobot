@@ -92,6 +92,8 @@ def generate_launch_description():
         "publish_geometry_updates": True,
         "publish_state_updates": True,
         "publish_transforms_updates": True,
+        "monitor_dynamics": False,
+        "joint_state_topic": "/joint_states",
     }
 
     moveit_controller_manager_yaml = load_yaml(
@@ -113,8 +115,8 @@ def generate_launch_description():
         "trajectory_execution.allowed_start_tolerance": 0.01,
     }
 
-    nodes = [
-        Node(
+    '''
+    Node(
             package="robot_state_publisher",
             executable="robot_state_publisher",
             output="log",
@@ -128,7 +130,9 @@ def generate_launch_description():
                 },
             ],
         ),
+    '''
 
+    nodes = [
         Node(
             package="moveit_ros_move_group",
             executable="move_group",
