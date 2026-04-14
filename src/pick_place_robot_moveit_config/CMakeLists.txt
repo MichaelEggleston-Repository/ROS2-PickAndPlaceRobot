@@ -4,7 +4,7 @@ project(pick_place_robot_moveit_config)
 find_package(ament_cmake REQUIRED)
 
 install(
-  DIRECTORY config launch srdf
+  DIRECTORY config launch rviz srdf
   DESTINATION share/${PROJECT_NAME}
 )
 

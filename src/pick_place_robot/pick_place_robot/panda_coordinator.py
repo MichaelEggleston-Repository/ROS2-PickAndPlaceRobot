@@ -4,29 +4,8 @@ from dataclasses import dataclass
 
 from pick_place_robot.panda_arm_control import PandaArmControl
 from pick_place_robot.panda_gripper_control import PandaGripperControl
-
-@dataclass
-class TaskSpacePose:
-    """
-    Describe a target end-effector pose in task space.
-
-    Inputs:
-        x: Target x position in meters.
-        y: Target y position in meters.
-        z: Target z position in meters.
-        roll: Target roll angle in radians.
-        pitch: Target pitch angle in radians.
-        yaw: Target yaw angle in radians.
-
-    Returns:
-        None
-    """
-    x: float
-    y: float
-    z: float
-    roll: float
-    pitch: float
-    yaw: float
+from pick_place_robot.panda_moveit_planner import PandaMoveItPlanner
+from pick_place_robot.task_space_pose import TaskSpacePose
 
 class PandaCoordinatorNode(Node):
     def __init__(self):
@@ -45,6 +24,7 @@ class PandaCoordinatorNode(Node):
         # Attach reusable control objects to this coordinator node.
         self._arm = PandaArmControl(self)
         self._gripper = PandaGripperControl(self)
+        self._planner = PandaMoveItPlanner()
 
     def wait_for_control_servers(self) -> bool:
         """
@@ -79,10 +59,6 @@ class PandaCoordinatorNode(Node):
 
         if not self._gripper.open_gripper():
             self.get_logger().error("Coordinator failed during gripper open motion.")
-            return False
-
-        if not self._gripper.close_gripper():
-            self.get_logger().error("Coordinator failed during gripper close motion.")
             return False
 
         self.get_logger().info("Coordinator motion sequence completed successfully.")
@@ -198,62 +174,146 @@ class PandaCoordinatorNode(Node):
         # Retreat upward after release to avoid brushing the placed object.
         return self.offset_pose_z(place_pose, 0.10)
     
-    def task_pose_to_joint_positions(self, pose: TaskSpacePose) -> list[float]:
+    def plan_to_pose(self, pose: TaskSpacePose) -> bool:
         """
-        Convert a task-space pose into Panda joint positions.
+        Ask the planner for a motion to a task-space pose and log the result.
 
         Inputs:
             pose: The target end-effector pose in task space.
 
         Returns:
-            list[float]: A 7-joint target for the Panda arm.
+            bool: True if planning succeeded, otherwise False.
+        """
+        self.get_logger().info("Requesting a plan from the Panda planner...")
 
-        Raises:
-            NotImplementedError: This conversion has not been implemented yet.
-        """
-        # This method is the future boundary between task planning and motion execution.
-        # Later, this can use IK, MoveIt, or another solver.
-        raise NotImplementedError(
-            "Task-space to joint-space conversion is not implemented yet."
-        )
+        result = self._planner.plan_to_task_pose(pose)
+
+        self.get_logger().info(f"Planning success: {result.success}")
+        self.get_logger().info(f"Planning message: {result.message}")
+
+        if result.joint_positions is not None:
+            self.get_logger().info(
+                f"Planned joint positions: {result.joint_positions}"
+            )
+
+        return result.success
     
-    def log_example_task_space_sequence(self) -> None:
+    def plan_and_move_to_pose(
+        self,
+        pose: TaskSpacePose,
+        duration_sec: int = 5,
+    ) -> bool:
         """
-        Build and log an example task-space pick-and-place sequence.
+        Plan to a task-space pose and execute the returned joint target.
+
+        Inputs:
+            pose: The target end-effector pose in task space.
+            duration_sec: The arm motion duration in seconds.
+
+        Returns:
+            bool: True if planning and execution both succeeded, otherwise False.
+        """
+        self.get_logger().info(
+            "Requesting planning and arm execution for a task-space pose..."
+        )
+
+        result = self._planner.plan_to_task_pose(pose)
+
+        self.get_logger().info(f"Planning success: {result.success}")
+        self.get_logger().info(f"Planning message: {result.message}")
+
+        if not result.success:
+            self.get_logger().error("Cannot execute motion because planning failed.")
+            return False
+
+        if result.joint_positions is None:
+            self.get_logger().error(
+                "Cannot execute motion because no joint positions were returned."
+            )
+            return False
+
+        self.get_logger().info(
+            f"Executing planned joint positions: {result.joint_positions}"
+        )
+
+        motion_succeeded = self._arm.move_to_joint_positions(
+            result.joint_positions,
+            duration_sec,
+        )
+
+        if not motion_succeeded:
+            self.get_logger().error("Arm motion failed after successful planning.")
+            return False
+
+        self.get_logger().info("Planned arm motion completed successfully.")
+        return True
+    
+    def run_cube_top_pose_test(self) -> bool:
+        """
+        Run a simple planning and motion test to hover above each cube.
 
         Inputs:
             None
 
         Returns:
-            None
+            bool: True if all cube-top motions succeeded, otherwise False.
         """
-        # This is a temporary sample object pose for testing the task-space logic.
-        # Later, this should come from perception or another upstream source.
-        object_pose = TaskSpacePose(
-            x=0.45,
-            y=0.00,
-            z=0.05,
+        cube_1_top_pose = TaskSpacePose(
+            x=0.600,
+            y=-0.400,
+            z=0.450,
             roll=3.14159,
             pitch=0.0,
             yaw=0.0,
         )
 
-        grasp_pose = self.create_grasp_pose(object_pose)
-        pre_grasp_pose = self.create_pre_grasp_pose(grasp_pose)
-        lift_pose = self.create_lift_pose(grasp_pose)
+        cube_2_top_pose = TaskSpacePose(
+            x=0.500,
+            y=0.000,
+            z=0.450,
+            roll=3.14159,
+            pitch=0.0,
+            yaw=0.0,
+        )
 
-        place_pose = self.create_place_pose()
-        pre_place_pose = self.create_pre_place_pose(place_pose)
-        place_depart_pose = self.create_place_depart_pose(place_pose)
+        cube_3_top_pose = TaskSpacePose(
+            x=0.550,
+            y=0.250,
+            z=0.450,
+            roll=3.14159,
+            pitch=0.0,
+            yaw=0.0,
+        )
 
-        self.get_logger().info("Example task-space sequence:")
-        self.get_logger().info(f"  Object pose:       {object_pose}")
-        self.get_logger().info(f"  Pre-grasp pose:    {pre_grasp_pose}")
-        self.get_logger().info(f"  Grasp pose:        {grasp_pose}")
-        self.get_logger().info(f"  Lift pose:         {lift_pose}")
-        self.get_logger().info(f"  Pre-place pose:    {pre_place_pose}")
-        self.get_logger().info(f"  Place pose:        {place_pose}")
-        self.get_logger().info(f"  Place-depart pose: {place_depart_pose}")
+        self.get_logger().info("Starting cube top pose test...")
+
+        self._planner.republish_static_environment()
+
+        self.get_logger().info("Testing cube_1 top pose...")
+        if not self.plan_and_move_to_pose(cube_1_top_pose):
+            self.get_logger().error("Cube_1 top pose test failed.")
+            return False
+
+        self.get_logger().info("Cube_1 top pose test succeeded.")
+
+        self.get_logger().info("Testing cube_2 top pose...")
+        if not self.plan_and_move_to_pose(cube_2_top_pose):
+            self.get_logger().error("Cube_2 top pose test failed.")
+            return False
+
+        self.get_logger().info("Cube_2 top pose test succeeded.")
+
+        self.get_logger().info("Testing cube_3 top pose...")
+        if not self.plan_and_move_to_pose(cube_3_top_pose):
+            self.get_logger().error("Cube_3 top pose test failed.")
+            return False
+
+        self.get_logger().info("Cube_3 top pose test succeeded.")
+        self.get_logger().info("Cube top pose test completed successfully.")
+
+        sequence_succeeded = self.run_startup_sequence()
+
+        return True
 
 def main(args=None):
     """
@@ -278,8 +338,7 @@ def main(args=None):
         sequence_succeeded = node.run_startup_sequence()
 
         if sequence_succeeded:
-            node.get_logger().info("Coordinator startup sequence succeeded.")
-            node.log_example_task_space_sequence()
+            node.run_cube_top_pose_test()
         else:
             node.get_logger().error("Coordinator startup sequence failed.")
     else:

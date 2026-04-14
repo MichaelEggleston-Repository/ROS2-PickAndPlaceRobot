@@ -10,7 +10,7 @@
   <joint name="panda_joint_base" type="fixed">
     <parent link="world"/>
     <child link="panda_link0"/>
-    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <origin rpy="0 0 -1.5708" xyz="0 0.6 0"/>
   </joint>
   <link name="panda_link0">
     <visual>

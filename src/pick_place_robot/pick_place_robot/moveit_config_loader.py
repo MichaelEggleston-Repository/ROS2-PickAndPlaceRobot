@@ -106,6 +106,14 @@ def build_moveit_config_dict() -> dict[str, Any]:
             "pipeline_names": ["ompl"],
         },
         "default_planning_pipeline": "ompl",
+            "plan_request_params": {
+            "planning_pipeline": "ompl",
+            "planner_id": "RRTConnectkConfigDefault",
+            "planning_attempts": 1,
+            "planning_time": 5.0,
+            "max_velocity_scaling_factor": 1.0,
+            "max_acceleration_scaling_factor": 1.0,
+        },
         "ompl": {
             "planning_plugins": ["ompl_interface/OMPLPlanner"],
             "request_adapters": [

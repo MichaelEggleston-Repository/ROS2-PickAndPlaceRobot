@@ -58,11 +58,11 @@ def generate_launch_description():
                     "-name", "panda",
                     "-file", panda_urdf,
                     "-x", "0.0",
-                    "-y", "0.6",
+                    "-y", "0.0",
                     "-z", "0.0",
                     "-R", "0.0",
                     "-P", "0.0",
-                    "-Y", "-1.5708",
+                    "-Y", "0.0",
                 ],
                 output="screen",
             )
