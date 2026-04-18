@@ -1,11 +1,14 @@
+# pick_place_robot/moveit_config_loader.py
 import os
 from typing import Any
 
+import xacro
 import yaml
 from ament_index_python.packages import get_package_share_directory
 
 MOVEIT_CONFIG_PACKAGE = "pick_place_robot_moveit_config"
 ROBOT_DESCRIPTION_PACKAGE = "pick_place_robot"
+
 
 def load_yaml(package_name: str, relative_path: str) -> dict[str, Any]:
     """
@@ -37,6 +40,7 @@ def load_yaml(package_name: str, relative_path: str) -> dict[str, Any]:
 
     return data
 
+
 def load_text(package_name: str, relative_path: str) -> str:
     """
     Load a text file from a ROS 2 package share directory.
@@ -57,19 +61,44 @@ def load_text(package_name: str, relative_path: str) -> str:
     except OSError as exc:
         raise RuntimeError(f"Failed to read text file: {absolute_path}") from exc
 
-def build_moveit_config_dict() -> dict[str, Any]:
+
+def build_robot_description(
+    enable_calibration: bool = False,
+) -> str:
+    """
+    Build the Panda robot description from xacro.
+
+    Inputs:
+        enable_calibration: If True, include the calibration tag on panda_hand_tcp.
+
+    Returns:
+        str: Fully processed robot description XML.
+    """
+    package_path = get_package_share_directory(ROBOT_DESCRIPTION_PACKAGE)
+    panda_urdf_xacro = os.path.join(package_path, "urdf", "panda.urdf.xacro")
+
+    return xacro.process_file(
+        panda_urdf_xacro,
+        mappings={
+            "enable_calibration": "true" if enable_calibration else "false",
+        },
+    ).toxml()
+
+
+def build_moveit_config_dict(
+    enable_calibration: bool = False,
+) -> dict[str, Any]:
     """
     Build the full MoveIt configuration dictionary for MoveItPy.
 
     Inputs:
-        None
+        enable_calibration: If True, include the calibration tag on panda_hand_tcp.
 
     Returns:
         dict[str, Any]: MoveIt parameters ready to pass into MoveItPy.
     """
-    robot_description = load_text(
-        ROBOT_DESCRIPTION_PACKAGE,
-        os.path.join("urdf", "panda.urdf"),
+    robot_description = build_robot_description(
+        enable_calibration=enable_calibration,
     )
 
     robot_description_semantic = load_text(
@@ -106,7 +135,7 @@ def build_moveit_config_dict() -> dict[str, Any]:
             "pipeline_names": ["ompl"],
         },
         "default_planning_pipeline": "ompl",
-            "plan_request_params": {
+        "plan_request_params": {
             "planning_pipeline": "ompl",
             "planner_id": "RRTConnectkConfigDefault",
             "planning_attempts": 1,
@@ -135,6 +164,8 @@ def build_moveit_config_dict() -> dict[str, Any]:
         "publish_geometry_updates": True,
         "publish_state_updates": True,
         "publish_transforms_updates": True,
+        "monitor_dynamics": False,
+        "joint_state_topic": "/joint_states",
         "allow_trajectory_execution": True,
         "moveit_manage_controllers": False,
         "trajectory_execution.allowed_execution_duration_scaling": 1.2,

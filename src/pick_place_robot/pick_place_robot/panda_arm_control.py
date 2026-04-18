@@ -1,9 +1,10 @@
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from copy import deepcopy
 
 from control_msgs.action import FollowJointTrajectory
-from trajectory_msgs.msg import JointTrajectoryPoint
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # Home pose values are kept as constants so they are easy to tune later.
 HOME_JOINT_POSITIONS = [-1.5708, -0.4, 0.0, -2.0, 0.0, 1.6, 0.8]
@@ -62,6 +63,51 @@ class PandaArmControl:
         self._node.get_logger().info("Panda arm action server is ready.")
         return True
 
+    def scale_joint_trajectory_timing(
+        self,
+        joint_trajectory: JointTrajectory,
+        speed_scale: float,
+    ) -> JointTrajectory:
+        """
+        Create a copy of a joint trajectory with scaled timing, velocities,
+        and accelerations.
+
+        Inputs:
+            joint_trajectory: The original planned joint trajectory.
+            speed_scale: Motion speed scale factor. Values above 1.0 speed up
+                the motion. Values below 1.0 slow it down.
+
+        Returns:
+            JointTrajectory: A scaled copy of the input joint trajectory.
+        """
+        if speed_scale <= 0.0:
+            raise ValueError("speed_scale must be greater than 0.0.")
+
+        scaled_trajectory = deepcopy(joint_trajectory)
+
+        for point in scaled_trajectory.points:
+            total_sec = (
+                float(point.time_from_start.sec)
+                + float(point.time_from_start.nanosec) / 1e9
+            )
+
+            scaled_sec = total_sec / speed_scale
+            scaled_whole_sec = int(scaled_sec)
+            scaled_nanosec = int((scaled_sec - scaled_whole_sec) * 1e9)
+
+            point.time_from_start.sec = scaled_whole_sec
+            point.time_from_start.nanosec = scaled_nanosec
+
+            if point.velocities:
+                point.velocities = [float(v) * speed_scale for v in point.velocities]
+
+            if point.accelerations:
+                point.accelerations = [
+                    float(a) * speed_scale * speed_scale for a in point.accelerations
+                ]
+
+        return scaled_trajectory
+
     def create_goal(
         self,
         joint_positions: list[float],
@@ -89,8 +135,63 @@ class PandaArmControl:
         point.positions = joint_positions
         point.time_from_start.sec = duration_sec
 
+        self._node.get_logger().info(
+            f"Creating arm goal with duration_sec={duration_sec}"
+        )
+
         goal.trajectory.points.append(point)
         return goal
+    
+    def prepare_joint_trajectory_for_execution(
+        self,
+        joint_trajectory: JointTrajectory,
+        terminal_hold_sec: float = 0.25,
+    ) -> JointTrajectory:
+        """
+        Create a controller-friendly copy of a planned joint trajectory.
+
+        Inputs:
+            joint_trajectory: The planned joint trajectory.
+            terminal_hold_sec: Extra hold time added at the final point.
+
+        Returns:
+            JointTrajectory: A modified trajectory ready for controller execution.
+        """
+        prepared_trajectory = deepcopy(joint_trajectory)
+
+        if not prepared_trajectory.points:
+            return prepared_trajectory
+
+        final_point = prepared_trajectory.points[-1]
+
+        if final_point.velocities:
+            final_point.velocities = [0.0] * len(final_point.velocities)
+
+        if final_point.accelerations:
+            final_point.accelerations = [0.0] * len(final_point.accelerations)
+
+        hold_point = deepcopy(final_point)
+
+        if hold_point.velocities:
+            hold_point.velocities = [0.0] * len(hold_point.velocities)
+
+        if hold_point.accelerations:
+            hold_point.accelerations = [0.0] * len(hold_point.accelerations)
+
+        final_time_sec = (
+            float(final_point.time_from_start.sec)
+            + float(final_point.time_from_start.nanosec) / 1e9
+        )
+        hold_time_sec = final_time_sec + terminal_hold_sec
+
+        hold_point.time_from_start.sec = int(hold_time_sec)
+        hold_point.time_from_start.nanosec = int(
+            (hold_time_sec - int(hold_time_sec)) * 1e9
+        )
+
+        prepared_trajectory.points.append(hold_point)
+
+        return prepared_trajectory
 
     def send_goal(self, goal: FollowJointTrajectory.Goal):
         """
@@ -124,12 +225,17 @@ class PandaArmControl:
         self._node.get_logger().info("Arm goal was accepted by the action server.")
         return goal_handle
 
-    def wait_for_result(self, goal_handle) -> bool:
+    def wait_for_result(
+        self,
+        goal_handle,
+        timeout_sec: float = 60.0,
+    ) -> bool:
         """
         Wait for an accepted Panda arm goal to finish executing.
 
         Inputs:
             goal_handle: The accepted ROS action goal handle returned by the server.
+            timeout_sec: Maximum time to wait for the action result.
 
         Returns:
             bool: True if the motion completed successfully, otherwise False.
@@ -137,7 +243,20 @@ class PandaArmControl:
         self._node.get_logger().info("Waiting for Panda arm motion to finish...")
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self._node, result_future)
+        start_time = self._node.get_clock().now()
+
+        while rclpy.ok() and not result_future.done():
+            rclpy.spin_once(self._node, timeout_sec=0.1)
+
+            elapsed_sec = (
+                self._node.get_clock().now() - start_time
+            ).nanoseconds / 1e9
+
+            if elapsed_sec > timeout_sec:
+                self._node.get_logger().error(
+                    f"Timed out waiting for arm motion result after {timeout_sec:.1f} seconds."
+                )
+                return False
 
         result = result_future.result()
 
@@ -170,6 +289,77 @@ class PandaArmControl:
             bool: True if the motion completed successfully, otherwise False.
         """
         goal = self.create_goal(joint_positions, duration_sec)
+        goal_handle = self.send_goal(goal)
+
+        if goal_handle is None:
+            return False
+
+        return self.wait_for_result(goal_handle)
+    
+    def move_to_joint_trajectory(
+        self,
+        joint_trajectory: JointTrajectory,
+        speed_scale: float = 1.0,
+    ) -> bool:
+        """
+        Send a full planned joint trajectory to the Panda arm controller and wait
+        for execution to finish.
+
+        Inputs:
+            joint_trajectory: The full joint trajectory to execute.
+            speed_scale: Motion speed scale factor. Values above 1.0 speed up
+                the motion. Values below 1.0 slow it down.
+
+        Returns:
+            bool: True if the motion completed successfully, otherwise False.
+        """
+        if not joint_trajectory.joint_names:
+            self._node.get_logger().error(
+                "Cannot execute joint trajectory because no joint names were provided."
+            )
+            return False
+
+        if not joint_trajectory.points:
+            self._node.get_logger().error(
+                "Cannot execute joint trajectory because it contains no points."
+            )
+            return False
+
+        scaled_trajectory = self.scale_joint_trajectory_timing(
+            joint_trajectory,
+            speed_scale,
+        )
+
+        prepared_trajectory = self.prepare_joint_trajectory_for_execution(
+            scaled_trajectory,
+            terminal_hold_sec=1,
+        )
+        
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = prepared_trajectory
+        goal.goal_time_tolerance.sec = 2
+        goal.goal_time_tolerance.nanosec = 0
+
+        self._node.get_logger().info(
+            "Sending full joint trajectory to Panda arm controller: "
+            f"{len(prepared_trajectory.points)} points, speed_scale={speed_scale:.2f}"
+        )
+
+        self._node.get_logger().info(
+            "Trajectory timing: "
+            f"points={len(prepared_trajectory.points)}, "
+            f"final_time_sec="
+            f"{prepared_trajectory.points[-1].time_from_start.sec + prepared_trajectory.points[-1].time_from_start.nanosec / 1e9:.3f}"
+        )
+
+        final_point = prepared_trajectory.points[-1]
+        self._node.get_logger().info(
+            f"Final trajectory point: "
+            f"time={final_point.time_from_start.sec + final_point.time_from_start.nanosec / 1e9:.3f}, "
+            f"velocities={list(final_point.velocities) if final_point.velocities else []}, "
+            f"accelerations={list(final_point.accelerations) if final_point.accelerations else []}"
+        )
+
         goal_handle = self.send_goal(goal)
 
         if goal_handle is None:

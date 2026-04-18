@@ -1,11 +1,12 @@
 import rclpy
 from rclpy.node import Node
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 from moveit.planning import MoveItPy
-
+from moveit_msgs.msg import Constraints, OrientationConstraint
 from geometry_msgs.msg import Pose, PoseStamped
+from trajectory_msgs.msg import JointTrajectory
 
 from pick_place_robot.moveit_config_loader import build_moveit_config_dict
 from pick_place_robot.task_space_pose import TaskSpacePose
@@ -19,14 +20,14 @@ class PlanningResult:
 
     Inputs:
         success: True if planning succeeded, otherwise False.
-        joint_positions: Final joint target chosen by the planner if available.
+        joint_trajectory: Planned joint trajectory if available.
         message: Human-readable status message for logging and debugging.
 
     Returns:
         None
     """
     success: bool
-    joint_positions: list[float] | None
+    joint_trajectory: JointTrajectory | None
     message: str
 
 class PandaMoveItPlanner:
@@ -71,6 +72,33 @@ class PandaMoveItPlanner:
             "Planning request received for task pose: "
             f"x={pose.x:.3f}, y={pose.y:.3f}, z={pose.z:.3f}, "
             f"roll={pose.roll:.3f}, pitch={pose.pitch:.3f}, yaw={pose.yaw:.3f}"
+        )
+
+    def log_current_tcp_pose(self) -> None:
+        """
+        Log the current TCP pose for debugging.
+
+        Inputs:
+            None
+
+        Returns:
+            None
+        """
+        tcp_pose = self.get_current_tcp_pose()
+
+        if tcp_pose is None:
+            self._node.get_logger().error("Current TCP pose is unavailable.")
+            return
+
+        self._node.get_logger().info(
+            "Current TCP pose: "
+            f"x={float(tcp_pose.position.x):.6f}, "
+            f"y={float(tcp_pose.position.y):.6f}, "
+            f"z={float(tcp_pose.position.z):.6f}, "
+            f"qx={float(tcp_pose.orientation.x):.6f}, "
+            f"qy={float(tcp_pose.orientation.y):.6f}, "
+            f"qz={float(tcp_pose.orientation.z):.6f}, "
+            f"qw={float(tcp_pose.orientation.w):.6f}"
         )
 
     def rpy_to_quaternion(
@@ -138,7 +166,112 @@ class PandaMoveItPlanner:
         target.pose.orientation.w = qw
 
         return target
+    
+    def create_orientation_path_constraint(
+        self,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+        tolerance_rad: float,
+    ) -> Constraints:
+        """
+        Create a path constraint that keeps the Panda TCP orientation close to
+        the requested quaternion throughout the motion.
 
+        Inputs:
+            qx: Quaternion x component.
+            qy: Quaternion y component.
+            qz: Quaternion z component.
+            qw: Quaternion w component.
+            tolerance_rad: Absolute orientation tolerance in radians for each axis.
+
+        Returns:
+            Constraints: A MoveIt path-constraint message for the Panda TCP.
+        """
+        constraint = OrientationConstraint()
+        constraint.header.frame_id = "panda_link0"
+        constraint.link_name = "panda_hand_tcp"
+
+        constraint.orientation.x = float(qx)
+        constraint.orientation.y = float(qy)
+        constraint.orientation.z = float(qz)
+        constraint.orientation.w = float(qw)
+
+        constraint.absolute_x_axis_tolerance = float(tolerance_rad)
+        constraint.absolute_y_axis_tolerance = float(tolerance_rad)
+        constraint.absolute_z_axis_tolerance = float(tolerance_rad)
+        constraint.weight = float(1.0)
+
+        path_constraints = Constraints()
+        path_constraints.orientation_constraints.append(constraint)
+
+        return path_constraints
+    
+    def get_current_tcp_pose(self) -> Pose | None:
+        """
+        Get the current pose of the Panda TCP from the available MoveItPy state interfaces.
+
+        Inputs:
+            None
+
+        Returns:
+            Pose | None:
+                The current TCP pose if available, otherwise None.
+        """
+        tcp_link_name = "panda_hand_tcp"
+
+        if hasattr(self._moveit, "get_planning_scene_monitor"):
+            planning_scene_monitor = self._moveit.get_planning_scene_monitor()
+
+            if planning_scene_monitor is not None:
+                try:
+                    with planning_scene_monitor.read_only() as scene:
+                        current_state = scene.current_state
+                        tcp_pose = current_state.get_pose(tcp_link_name)
+
+                        if tcp_pose is not None:
+                            pose = Pose()
+                            pose.position.x = tcp_pose.position.x
+                            pose.position.y = tcp_pose.position.y
+                            pose.position.z = tcp_pose.position.z
+                            pose.orientation.x = tcp_pose.orientation.x
+                            pose.orientation.y = tcp_pose.orientation.y
+                            pose.orientation.z = tcp_pose.orientation.z
+                            pose.orientation.w = tcp_pose.orientation.w
+                            return pose
+                except Exception as exc:
+                    self._node.get_logger().warn(
+                        f"Failed to read TCP pose from planning scene monitor: {exc}"
+                    )
+
+        if hasattr(self._moveit, "get_planning_scene"):
+            try:
+                planning_scene = self._moveit.get_planning_scene()
+                current_state = planning_scene.current_state
+                tcp_pose = current_state.get_pose(tcp_link_name)
+
+                if tcp_pose is not None:
+                    pose = Pose()
+                    pose.position.x = tcp_pose.position.x
+                    pose.position.y = tcp_pose.position.y
+                    pose.position.z = tcp_pose.position.z
+                    pose.orientation.x = tcp_pose.orientation.x
+                    pose.orientation.y = tcp_pose.orientation.y
+                    pose.orientation.z = tcp_pose.orientation.z
+                    pose.orientation.w = tcp_pose.orientation.w
+                    return pose
+            except Exception as exc:
+                self._node.get_logger().warn(
+                    f"Failed to read TCP pose from planning scene: {exc}"
+                )
+
+        self._node.get_logger().error(
+            "Could not read the current TCP pose from MoveItPy. "
+            f"Available MoveItPy methods: {dir(self._moveit)}"
+        )
+        return None
+    
     def plan_to_task_pose(self, pose) -> PlanningResult:
         """
         Plan an arm motion to a task-space pose.
@@ -173,29 +306,125 @@ class PandaMoveItPlanner:
         if not plan_result:
             return PlanningResult(
                 success=False,
-                joint_positions=None,
+                joint_trajectory=None,
                 message="MoveIt planning failed to produce a plan.",
             )
 
         if plan_result.trajectory is None:
             return PlanningResult(
                 success=False,
-                joint_positions=None,
+                joint_trajectory=None,
                 message="MoveIt planning failed because no trajectory was returned.",
             )
-        
+
         trajectory_msg = plan_result.trajectory.get_robot_trajectory_msg()
         joint_trajectory = trajectory_msg.joint_trajectory
 
-        final_point = joint_trajectory.points[-1]
-        joint_positions = list(final_point.positions)
+        if not joint_trajectory.points:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message="MoveIt planning returned an empty joint trajectory.",
+            )
 
         return PlanningResult(
             success=True,
-            joint_positions=joint_positions,
-            message="MoveIt planning succeeded and joint positions were extracted.",
+            joint_trajectory=joint_trajectory,
+            message="MoveIt planning succeeded and a joint trajectory was extracted.",
+        )
+        
+    def plan_to_task_pose_with_orientation_constraint(
+        self,
+        pose: TaskSpacePose,
+        orientation_tolerance_rad: float = 1.0,
+    ) -> PlanningResult:
+        """
+        Plan an arm motion to a task-space pose while constraining the TCP
+        orientation throughout the path.
+
+        Inputs:
+            pose: The target end-effector pose in task space.
+            orientation_tolerance_rad: Maximum allowed orientation error in radians
+                about each axis.
+
+        Returns:
+            PlanningResult: The outcome of the constrained planning request.
+        """
+        self.log_requested_pose(pose)
+
+        target_pose = self.create_pose_target(pose)
+
+        self._node.get_logger().info(
+            "Created constrained pose target in frame "
+            f"'{target_pose.header.frame_id}': "
+            f"x={target_pose.pose.position.x:.3f}, "
+            f"y={target_pose.pose.position.y:.3f}, "
+            f"z={target_pose.pose.position.z:.3f}"
         )
 
+        qx, qy, qz, qw = self.rpy_to_quaternion(
+            pose.roll,
+            pose.pitch,
+            pose.yaw,
+        )
+
+        path_constraints = self.create_orientation_path_constraint(
+            qx,
+            qy,
+            qz,
+            qw,
+            orientation_tolerance_rad,
+        )
+
+        self._arm.set_start_state_to_current_state()
+
+        try:
+            self._arm.set_path_constraints(path_constraints)
+        except AttributeError:
+            self._arm.setPathConstraints(path_constraints)
+
+        self._arm.set_goal_state(
+            pose_stamped_msg=target_pose,
+            pose_link="panda_hand_tcp",
+        )
+
+        plan_result = self._arm.plan()
+
+        try:
+            self._arm.set_path_constraints(Constraints())
+        except AttributeError:
+            self._arm.setPathConstraints(Constraints())
+
+        if not plan_result:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message="MoveIt constrained planning failed to produce a plan.",
+            )
+
+        if plan_result.trajectory is None:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message="MoveIt constrained planning failed because no trajectory was returned.",
+            )
+
+        trajectory_msg = plan_result.trajectory.get_robot_trajectory_msg()
+        joint_trajectory = trajectory_msg.joint_trajectory
+
+        if not joint_trajectory.points:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message="MoveIt constrained planning returned an empty joint trajectory.",
+            )
+
+        return PlanningResult(
+            success=True,
+            joint_trajectory=joint_trajectory,
+            message="MoveIt constrained planning succeeded and a joint trajectory was extracted.",
+        )
+    
     def run_planning_smoke_test(self) -> None:
         """
         Run a simple manual planning smoke test using one task-space target.
@@ -222,9 +451,9 @@ class PandaMoveItPlanner:
         self._node.get_logger().info(f"Planning message: {result.message}")
         self._node.get_logger().info(
             "Joint positions returned: "
-            f"{result.joint_positions is not None}"
+            f"{result.joint_trajectory is not None}"
         )
-        self._node.get_logger().info(f"Returned joint positions: {result.joint_positions}")
+        self._node.get_logger().info(f"Returned joint positions: {result.joint_trajectory}")
         
 def main(args=None):
     """

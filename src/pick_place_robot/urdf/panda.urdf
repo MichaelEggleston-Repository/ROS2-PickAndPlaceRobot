@@ -548,7 +548,7 @@
   </ros2_control>
   <gazebo>
     <plugin filename="ign_ros2_control-system" name="ign_ros2_control::IgnitionROS2ControlPlugin">
-      <parameters>/home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_moveit_config/share/panda_moveit_config/config/controllers_effort.yaml</parameters>
+      <parameters>/home/michael/Projects/ROS2-PickAndPlaceRobot/src/pick_place_robot_moveit_config/config/controllers_effort.yaml</parameters>
     </plugin>
   </gazebo>
 </robot>

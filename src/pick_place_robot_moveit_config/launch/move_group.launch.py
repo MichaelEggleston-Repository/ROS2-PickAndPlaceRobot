@@ -5,197 +5,121 @@ from typing import List
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
-def generate_launch_description():
-    declared_arguments = generate_declared_arguments()
+from pick_place_robot.moveit_config_loader import build_moveit_config_dict
 
-    moveit_config_package = "pick_place_robot_moveit_config"
-    robot_description_package = "pick_place_robot"
+def launch_setup(context, *args, **kwargs):
+    """
+    Build the MoveIt launch actions after resolving launch arguments.
 
+    Inputs:
+        context: Launch runtime context used to resolve substitutions.
+        args: Unused positional launch arguments.
+        kwargs: Unused keyword launch arguments.
+
+    Returns:
+        list: Launch actions created from the resolved launch arguments.
+    """
     enable_rviz = LaunchConfiguration("enable_rviz")
     rviz_config = LaunchConfiguration("rviz_config")
     use_sim_time = LaunchConfiguration("use_sim_time")
     log_level = LaunchConfiguration("log_level")
 
-    robot_description = {
-        "robot_description": load_text(
-            robot_description_package,
-            path.join("urdf", "panda.urdf"),
-        )
-    }
+    enable_calibration_value = LaunchConfiguration(
+        "enable_calibration"
+    ).perform(context)
 
-    robot_description_semantic = {
-        "robot_description_semantic": load_text(
-            moveit_config_package,
-            path.join("srdf", "panda.srdf"),
-        )
-    }
-
-    robot_description_kinematics = {
-        "robot_description_kinematics": {
-            "arm": {
-                "kinematics_solver": "kdl_kinematics_plugin/KDLKinematicsPlugin",
-                "kinematics_solver_search_resolution": 0.0025,
-                "kinematics_solver_timeout": 0.05,
-                "kinematics_solver_attempts": 5,
-            }
-        }
-    }
-
-    joint_limits = {
-        "robot_description_planning": load_yaml(
-            moveit_config_package,
-            path.join("config", "joint_limits.yaml"),
-        )
-    }
-
-    planning_pipeline = {
-        "planning_pipelines": {
-            "pipeline_names": ["ompl"],
-        },
-        "default_planning_pipeline": "ompl",
-        "ompl": {
-            "planning_plugins": ["ompl_interface/OMPLPlanner"],
-            "request_adapters": [
-                "default_planning_request_adapters/ResolveConstraintFrames",
-                "default_planning_request_adapters/ValidateWorkspaceBounds",
-                "default_planning_request_adapters/CheckStartStateBounds",
-                "default_planning_request_adapters/CheckStartStateCollision",
-                "default_planning_request_adapters/CheckForStackedConstraints",
-            ],
-            "response_adapters": [
-                "default_planning_response_adapters/AddTimeOptimalParameterization",
-                "default_planning_response_adapters/ValidateSolution",
-                "default_planning_response_adapters/DisplayMotionPath",
-            ],
-            "start_state_max_bounds_error": 0.31416,
-            "planner_configs": {
-                "RRTConnectkConfigDefault": {
-                    "type": "geometric::RRTConnect",
-                    "range": 0.0,
-                },
-            },
-            "arm": {
-                "projection_evaluator": "joints(panda_joint1,panda_joint2)",
-                "planner_configs": ["RRTConnectkConfigDefault"],
-                "longest_valid_segment_fraction": 0.005,
-            },
-        },
-    }
-
-    planning_scene_monitor_parameters = {
-        "publish_planning_scene": True,
-        "publish_geometry_updates": True,
-        "publish_state_updates": True,
-        "publish_transforms_updates": True,
-        "monitor_dynamics": False,
-        "joint_state_topic": "/joint_states",
-    }
-
-    moveit_controller_manager_yaml = load_yaml(
-        moveit_config_package,
-        path.join("config", "moveit_controller_manager.yaml"),
+    moveit_config = build_moveit_config_dict(
+        enable_calibration=(enable_calibration_value == "true"),
     )
-    moveit_controller_manager = {
-        "moveit_controller_manager": (
-            "moveit_simple_controller_manager/MoveItSimpleControllerManager"
-        ),
-        "moveit_simple_controller_manager": moveit_controller_manager_yaml,
-    }
 
-    trajectory_execution = {
-        "allow_trajectory_execution": True,
-        "moveit_manage_controllers": False,
-        "trajectory_execution.allowed_execution_duration_scaling": 1.2,
-        "trajectory_execution.allowed_goal_duration_margin": 0.5,
-        "trajectory_execution.allowed_start_tolerance": 0.01,
-    }
-
-    '''
-    Node(
-            package="robot_state_publisher",
-            executable="robot_state_publisher",
-            output="log",
-            arguments=["--ros-args", "--log-level", log_level],
-            parameters=[
-                robot_description,
-                {
-                    "publish_frequency": 50.0,
-                    "frame_prefix": "",
-                    "use_sim_time": use_sim_time,
-                },
-            ],
-        ),
-    '''
-
-    nodes = [
-        Node(
-            package="moveit_ros_move_group",
-            executable="move_group",
-            output="log",
-            arguments=["--ros-args", "--log-level", log_level],
-            parameters=[
-                robot_description,
-                robot_description_semantic,
-                robot_description_kinematics,
-                joint_limits,
-                planning_pipeline,
-                trajectory_execution,
-                planning_scene_monitor_parameters,
-                moveit_controller_manager,
-                {"use_sim_time": use_sim_time},
-            ],
-        ),
-
-        Node(
-            package="rviz2",
-            executable="rviz2",
-            output="log",
-            arguments=[
-                "--display-config",
-                rviz_config,
-                "--ros-args",
-                "--log-level",
-                log_level,
-            ],
-            parameters=[
-                robot_description,
-                robot_description_semantic,
-                robot_description_kinematics,
-                planning_pipeline,
-                joint_limits,
-                {"use_sim_time": use_sim_time},
-            ],
-            condition=IfCondition(enable_rviz),
-        ),
+    move_group_parameters = [
+        moveit_config,
+        {"use_sim_time": use_sim_time},
     ]
 
-    return LaunchDescription(declared_arguments + nodes)
+    rviz_parameters = [
+        {
+            "robot_description": moveit_config["robot_description"],
+            "robot_description_semantic": moveit_config[
+                "robot_description_semantic"
+            ],
+            "robot_description_kinematics": moveit_config[
+                "robot_description_kinematics"
+            ],
+            "robot_description_planning": moveit_config[
+                "robot_description_planning"
+            ],
+            "planning_pipelines": moveit_config["planning_pipelines"],
+            "default_planning_pipeline": moveit_config[
+                "default_planning_pipeline"
+            ],
+            "ompl": moveit_config["ompl"],
+            "use_sim_time": use_sim_time,
+        },
+    ]
 
-def load_yaml(package_name: str, file_path: str):
-    package_path = get_package_share_directory(package_name)
-    absolute_file_path = path.join(package_path, file_path)
+    move_group_node = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="log",
+        arguments=["--ros-args", "--log-level", log_level],
+        parameters=move_group_parameters,
+    )
 
-    import yaml
+    rviz_node = Node(
+        package="rviz2",
+        executable="rviz2",
+        output="log",
+        arguments=[
+            "--display-config",
+            rviz_config,
+            "--ros-args",
+            "--log-level",
+            log_level,
+        ],
+        parameters=rviz_parameters,
+        condition=IfCondition(enable_rviz),
+    )
 
-    try:
-        with open(absolute_file_path, "r", encoding="utf-8") as file:
-            return yaml.safe_load(file)
-    except EnvironmentError:
-        return None
+    return [
+        move_group_node,
+        rviz_node,
+    ]
 
-def load_text(package_name: str, file_path: str) -> str:
-    package_path = get_package_share_directory(package_name)
-    absolute_file_path = path.join(package_path, file_path)
+def generate_launch_description():
+    """
+    Generate the MoveIt launch description for the Panda robot.
 
-    with open(absolute_file_path, "r", encoding="utf-8") as file:
-        return file.read()
+    Inputs:
+        None
+
+    Returns:
+        LaunchDescription: Full launch description for move_group and optional RViz.
+    """
+    declared_arguments = generate_declared_arguments()
+
+    return LaunchDescription(
+        declared_arguments
+        + [
+            OpaqueFunction(function=launch_setup),
+        ]
+    )
 
 def generate_declared_arguments() -> List[DeclareLaunchArgument]:
+    """
+    Build the declared launch arguments for the MoveIt launch file.
+
+    Inputs:
+        None
+
+    Returns:
+        List[DeclareLaunchArgument]: Declared launch arguments.
+    """
     return [
         DeclareLaunchArgument(
             "enable_rviz",
@@ -213,12 +137,17 @@ def generate_declared_arguments() -> List[DeclareLaunchArgument]:
         ),
         DeclareLaunchArgument(
             "use_sim_time",
-            default_value="false",
+            default_value="true",
             description="If true, use simulated clock.",
         ),
         DeclareLaunchArgument(
             "log_level",
             default_value="warn",
             description="Log level applied to launched ROS 2 nodes.",
+        ),
+        DeclareLaunchArgument(
+            "enable_calibration",
+            default_value="false",
+            description="If true, include the calibration tag on panda_hand_tcp.",
         ),
     ]

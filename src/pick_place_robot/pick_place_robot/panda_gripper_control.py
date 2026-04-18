@@ -8,7 +8,7 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 # Open and closed positions for each Panda finger joint.
 GRIPPER_OPEN_POSITION = 0.04
 GRIPPER_CLOSED_POSITION = 0.0
-GRIPPER_MOVE_DURATION_SEC = 2
+GRIPPER_MOVE_DURATION_SEC = 1
 
 # Keep the finger joint ordering in one place.
 GRIPPER_JOINT_NAMES = [

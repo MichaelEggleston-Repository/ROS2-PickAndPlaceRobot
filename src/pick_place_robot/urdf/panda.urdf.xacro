@@ -4,25 +4,26 @@
 <!-- |    EDITING THIS FILE BY HAND IS NOT RECOMMENDED                                 | -->
 <!-- =================================================================================== -->
 <!-- URDF for Franka Emika Panda -->
-<robot name="panda">
+<robot name="panda" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="enable_calibration" default="false"/>
   <link name="world">
   </link>
   <joint name="panda_joint_base" type="fixed">
     <parent link="world"/>
     <child link="panda_link0"/>
-    <origin rpy="0 0 0" xyz="0 0 0"/>
+    <origin rpy="0 0 -1.5708" xyz="0 0.6 0"/>
   </joint>
   <link name="panda_link0">
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link0.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link0.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link0.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link0.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -60,13 +61,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link1.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link1.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link1.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link1.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -104,13 +105,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link2.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link2.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link2.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link2.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -148,13 +149,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link3.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link3.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link3.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link3.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -192,13 +193,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link4.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link4.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link4.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link4.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -236,13 +237,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link5.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link5.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link5.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link5.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -280,13 +281,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link6.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link6.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link6.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link6.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -324,13 +325,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/link7.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/link7.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/link7.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/link7.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -413,13 +414,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/hand.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/hand.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/hand.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/hand.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -457,13 +458,13 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/finger.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/finger.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/finger.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/finger.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -501,13 +502,13 @@
     <visual>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/visual/finger.dae"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/visual/finger.dae"/>
       </geometry>
     </visual>
     <collision>
       <origin rpy="0 0 3.141592653589793" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="package://panda_description/meshes/collision/finger.stl"/>
+        <mesh filename="file:///home/michael/Projects/ROS2-PickAndPlaceRobot/install/panda_description/share/panda_description/meshes/collision/finger.stl"/>
       </geometry>
     </collision>
     <inertial>
@@ -527,6 +528,39 @@
     <child link="panda_hand_tcp"/>
     <origin rpy="0 0 0" xyz="0 0 0.1034"/>
   </joint>
+  <xacro:if value="$(arg enable_calibration)">
+    <link name="calibration_tag_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+        <geometry>
+          <mesh filename="file://$(find pick_place_robot)/meshes/april_tag_plate.dae"/>
+        </geometry>
+      </visual>
+
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="0.08 0.01 0.08"/>
+        </geometry>
+      </collision>
+
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="0.01"/>
+        <inertia ixx="0.00001" ixy="0.0" ixz="0.0" iyy="0.00001" iyz="0.0" izz="0.00001"/>
+      </inertial>
+    </link>
+
+    <joint name="calibration_tag_joint" type="fixed">
+      <parent link="panda_hand_tcp"/>
+      <child link="calibration_tag_link"/>
+      <origin xyz="0.0 0.0 0.010" rpy="0.0 0.0 0.0"/>
+    </joint>
+
+    <gazebo reference="calibration_tag_joint">
+      <preserveFixedJoint>true</preserveFixedJoint>
+    </gazebo>
+  </xacro:if>
   <ros2_control name="panda_gripper_system" type="system">
     <hardware>
       <plugin>ign_ros2_control/IgnitionSystem</plugin>
