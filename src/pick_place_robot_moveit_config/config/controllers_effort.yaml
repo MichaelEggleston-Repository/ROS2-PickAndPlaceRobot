@@ -27,29 +27,29 @@ joint_trajectory_controller:
       - position
       - velocity
     constraints:
-      goal_time: 2.0
-      stopped_velocity_tolerance: 0.2
+      goal_time: 4.0
+      stopped_velocity_tolerance: 0.5
       panda_joint1:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint2:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint3:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint4:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint5:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint6:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
       panda_joint7:
         goal: 0.02
-        trajectory: 0.05
+        trajectory: 0.08
     gains:
       panda_joint1:
         p: 4000.0

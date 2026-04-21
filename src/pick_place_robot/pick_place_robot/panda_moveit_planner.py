@@ -13,6 +13,26 @@ from pick_place_robot.task_space_pose import TaskSpacePose
 
 ARM_GROUP_NAME = "arm"
 
+PANDA_ARM_JOINT_NAMES = [
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7",
+]
+
+PANDA_JOINT_LIMITS = {
+    "panda_joint1": (-2.8973, 2.8973),
+    "panda_joint2": (-1.7628, 1.7628),
+    "panda_joint3": (-2.8973, 2.8973),
+    "panda_joint4": (-3.0718, -0.0698),
+    "panda_joint5": (-2.8973, 2.8973),
+    "panda_joint6": (-0.0175, 3.7525),
+    "panda_joint7": (-2.8973, 2.8973),
+}
+
 @dataclass
 class PlanningResult:
     """
@@ -208,6 +228,119 @@ class PandaMoveItPlanner:
 
         return path_constraints
     
+    def trajectory_respects_joint_margin(
+        self,
+        joint_trajectory: JointTrajectory,
+        margin_rad: float = 0.10,
+    ) -> tuple[bool, str]:
+        """
+        Check whether every waypoint in a planned trajectory stays a safe distance
+        away from the Panda joint limits.
+
+        Inputs:
+            joint_trajectory: Planned arm trajectory returned by MoveIt.
+            margin_rad: Minimum distance each waypoint must keep from the hard joint limits.
+
+        Returns:
+            tuple[bool, str]:
+                True and a success message if the full trajectory is safe,
+                otherwise False and the reason for rejection.
+        """
+        if not joint_trajectory.joint_names:
+            return False, "Trajectory contains no joint names."
+
+        if not joint_trajectory.points:
+            return False, "Trajectory contains no points."
+
+        for point_index, point in enumerate(joint_trajectory.points):
+            for joint_name, joint_position in zip(
+                joint_trajectory.joint_names,
+                point.positions,
+            ):
+                limits = PANDA_JOINT_LIMITS.get(joint_name)
+
+                if limits is None:
+                    continue
+
+                lower_limit, upper_limit = limits
+
+                if joint_position <= lower_limit + margin_rad:
+                    return (
+                        False,
+                        f"Waypoint {point_index} rejected because {joint_name}="
+                        f"{joint_position:.4f} is within {margin_rad:.3f} rad "
+                        f"of lower limit {lower_limit:.4f}.",
+                    )
+
+                if joint_position >= upper_limit - margin_rad:
+                    return (
+                        False,
+                        f"Waypoint {point_index} rejected because {joint_name}="
+                        f"{joint_position:.4f} is within {margin_rad:.3f} rad "
+                        f"of upper limit {upper_limit:.4f}.",
+                    )
+
+        return True, "Trajectory stayed within joint safety margins."
+
+    def final_waypoint_respects_branch_continuity(
+        self,
+        joint_trajectory: JointTrajectory,
+        max_total_jump_rad: float = 4.0,
+        max_single_joint_jump_rad: float = 1.8,
+    ) -> tuple[bool, str]:
+        """
+        Check whether the final waypoint stays reasonably close to the current arm
+        joint state, to reduce branch-flip solutions.
+
+        Inputs:
+            joint_trajectory: Planned arm trajectory returned by MoveIt.
+            max_total_jump_rad: Maximum allowed sum of absolute joint deltas.
+            max_single_joint_jump_rad: Maximum allowed absolute delta for any one joint.
+
+        Returns:
+            tuple[bool, str]:
+                True and a success message if the final waypoint looks continuous,
+                otherwise False and the reason for rejection.
+        """
+        current_joint_positions = self.get_current_arm_joint_positions()
+
+        if current_joint_positions is None:
+            return True, "Current joint state unavailable, skipping continuity check."
+
+        if not joint_trajectory.points:
+            return False, "Trajectory contains no points."
+
+        final_point = joint_trajectory.points[-1]
+        total_jump = 0.0
+
+        for joint_name, final_position in zip(
+            joint_trajectory.joint_names,
+            final_point.positions,
+        ):
+            if joint_name not in current_joint_positions:
+                continue
+
+            delta = abs(float(final_position) - current_joint_positions[joint_name])
+            total_jump += delta
+
+            if delta > max_single_joint_jump_rad:
+                return (
+                    False,
+                    f"Final waypoint rejected because {joint_name} jumps by "
+                    f"{delta:.3f} rad, exceeding the limit of "
+                    f"{max_single_joint_jump_rad:.3f} rad.",
+                )
+
+        if total_jump > max_total_jump_rad:
+            return (
+                False,
+                f"Final waypoint rejected because total joint jump is "
+                f"{total_jump:.3f} rad, exceeding the limit of "
+                f"{max_total_jump_rad:.3f} rad.",
+            )
+
+        return True, "Final waypoint respected branch continuity limits."
+    
     def get_current_tcp_pose(self) -> Pose | None:
         """
         Get the current pose of the Panda TCP from the available MoveItPy state interfaces.
@@ -271,6 +404,53 @@ class PandaMoveItPlanner:
             f"Available MoveItPy methods: {dir(self._moveit)}"
         )
         return None
+
+    def get_current_arm_joint_positions(self) -> dict[str, float] | None:
+        """
+        Read the current Panda arm joint positions from the planning scene monitor.
+
+        Inputs:
+            None
+
+        Returns:
+            dict[str, float] | None:
+                Mapping from Panda arm joint name to current joint position,
+                or None if the state could not be read.
+        """
+        if not hasattr(self._moveit, "get_planning_scene_monitor"):
+            self._node.get_logger().warn(
+                "MoveItPy does not expose get_planning_scene_monitor()."
+            )
+            return None
+
+        planning_scene_monitor = self._moveit.get_planning_scene_monitor()
+
+        if planning_scene_monitor is None:
+            self._node.get_logger().warn(
+                "Planning scene monitor was unavailable while reading arm joints."
+            )
+            return None
+
+        try:
+            with planning_scene_monitor.read_only() as scene:
+                current_state = scene.current_state
+                group_positions = current_state.get_joint_group_positions(ARM_GROUP_NAME)
+
+                if len(group_positions) != len(PANDA_ARM_JOINT_NAMES):
+                    self._node.get_logger().warn(
+                        "Unexpected Panda arm joint count returned from RobotState."
+                    )
+                    return None
+
+                return {
+                    joint_name: float(position)
+                    for joint_name, position in zip(PANDA_ARM_JOINT_NAMES, group_positions)
+                }
+        except Exception as exc:
+            self._node.get_logger().warn(
+                f"Failed to read current Panda arm joint positions: {exc}"
+            )
+            return None
     
     def plan_to_task_pose(self, pose) -> PlanningResult:
         """
@@ -301,36 +481,139 @@ class PandaMoveItPlanner:
             pose_link="panda_hand_tcp",
         )
 
-        plan_result = self._arm.plan()
+        return self.plan_safe_trajectory_with_retries(
+            max_attempts=30,
+            margin_rad=0.10,
+        )
 
-        if not plan_result:
-            return PlanningResult(
-                success=False,
-                joint_trajectory=None,
-                message="MoveIt planning failed to produce a plan.",
-            )
+    def final_goal_respects_joint_margin(
+        self,
+        joint_trajectory: JointTrajectory,
+        margin_rad: float = 0.10,
+    ) -> tuple[bool, str]:
+        """
+        Check whether the final waypoint in a planned trajectory stays a safe
+        distance away from the Panda joint limits.
 
-        if plan_result.trajectory is None:
-            return PlanningResult(
-                success=False,
-                joint_trajectory=None,
-                message="MoveIt planning failed because no trajectory was returned.",
-            )
+        Inputs:
+            joint_trajectory: Planned arm trajectory returned by MoveIt.
+            margin_rad: Minimum distance the final waypoint must keep from
+                the hard joint limits.
 
-        trajectory_msg = plan_result.trajectory.get_robot_trajectory_msg()
-        joint_trajectory = trajectory_msg.joint_trajectory
+        Returns:
+            tuple[bool, str]:
+                True and a success message if the final waypoint is safe,
+                otherwise False and the reason for rejection.
+        """
+        if not joint_trajectory.joint_names:
+            return False, "Trajectory contains no joint names."
 
         if not joint_trajectory.points:
+            return False, "Trajectory contains no points."
+
+        final_point = joint_trajectory.points[-1]
+
+        for joint_name, joint_position in zip(
+            joint_trajectory.joint_names,
+            final_point.positions,
+        ):
+            limits = PANDA_JOINT_LIMITS.get(joint_name)
+
+            if limits is None:
+                continue
+
+            lower_limit, upper_limit = limits
+
+            if joint_position <= lower_limit + margin_rad:
+                return (
+                    False,
+                    f"Final waypoint rejected because {joint_name}={joint_position:.4f} "
+                    f"is within {margin_rad:.3f} rad of lower limit {lower_limit:.4f}.",
+                )
+
+            if joint_position >= upper_limit - margin_rad:
+                return (
+                    False,
+                    f"Final waypoint rejected because {joint_name}={joint_position:.4f} "
+                    f"is within {margin_rad:.3f} rad of upper limit {upper_limit:.4f}.",
+                )
+
+        return True, "Final waypoint stayed within joint safety margins."
+
+    def plan_safe_trajectory_with_retries(
+        self,
+        max_attempts: int = 15,
+        margin_rad: float = 0.10,
+    ) -> PlanningResult:
+        """
+        Ask MoveIt for multiple plans and return the first trajectory that stays
+        within the configured joint safety margin.
+
+        Inputs:
+            max_attempts: Maximum number of planning attempts to try.
+            margin_rad: Minimum distance each waypoint must keep from hard joint limits.
+
+        Returns:
+            PlanningResult:
+                Successful result containing the first safe joint trajectory found,
+                otherwise a failure result describing the last rejection reason.
+        """
+        last_message = "MoveIt planning did not produce a safe trajectory."
+
+        for attempt_index in range(1, max_attempts + 1):
+            self._node.get_logger().info(
+                f"Planning attempt {attempt_index}/{max_attempts}..."
+            )
+
+            plan_result = self._arm.plan()
+
+            if not plan_result:
+                last_message = (
+                    f"Planning attempt {attempt_index} failed to produce a plan."
+                )
+                continue
+
+            if plan_result.trajectory is None:
+                last_message = (
+                    f"Planning attempt {attempt_index} returned no trajectory."
+                )
+                continue
+
+            trajectory_msg = plan_result.trajectory.get_robot_trajectory_msg()
+            joint_trajectory = trajectory_msg.joint_trajectory
+
+            if not joint_trajectory.points:
+                last_message = (
+                    f"Planning attempt {attempt_index} returned an empty trajectory."
+                )
+                continue
+
+            trajectory_is_safe, safety_message = self.final_goal_respects_joint_margin(
+                joint_trajectory,
+                margin_rad=margin_rad,
+            )
+
+            if not trajectory_is_safe:
+                last_message = (
+                    f"Planning attempt {attempt_index} produced an unsafe trajectory. "
+                    f"{safety_message}"
+                )
+                self._node.get_logger().warn(last_message)
+                continue
+
             return PlanningResult(
-                success=False,
-                joint_trajectory=None,
-                message="MoveIt planning returned an empty joint trajectory.",
+                success=True,
+                joint_trajectory=joint_trajectory,
+                message=(
+                    f"MoveIt planning succeeded on attempt {attempt_index} "
+                    "and the trajectory passed safety screening."
+                ),
             )
 
         return PlanningResult(
-            success=True,
-            joint_trajectory=joint_trajectory,
-            message="MoveIt planning succeeded and a joint trajectory was extracted.",
+            success=False,
+            joint_trajectory=None,
+            message=last_message,
         )
         
     def plan_to_task_pose_with_orientation_constraint(
@@ -419,10 +702,28 @@ class PandaMoveItPlanner:
                 message="MoveIt constrained planning returned an empty joint trajectory.",
             )
 
+        trajectory_is_safe, safety_message = self.trajectory_respects_joint_margin(
+            joint_trajectory,
+            margin_rad=0.10,
+        )
+
+        if not trajectory_is_safe:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message=(
+                    "MoveIt constrained planning produced an unsafe joint trajectory. "
+                    f"{safety_message}"
+                ),
+            )
+
         return PlanningResult(
             success=True,
             joint_trajectory=joint_trajectory,
-            message="MoveIt constrained planning succeeded and a joint trajectory was extracted.",
+            message=(
+                "MoveIt constrained planning succeeded and the joint trajectory "
+                "passed safety screening."
+            ),
         )
     
     def run_planning_smoke_test(self) -> None:

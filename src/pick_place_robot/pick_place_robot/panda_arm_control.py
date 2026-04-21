@@ -228,7 +228,7 @@ class PandaArmControl:
     def wait_for_result(
         self,
         goal_handle,
-        timeout_sec: float = 60.0,
+        timeout_sec: float = 120.0,
     ) -> bool:
         """
         Wait for an accepted Panda arm goal to finish executing.
@@ -324,17 +324,16 @@ class PandaArmControl:
                 "Cannot execute joint trajectory because it contains no points."
             )
             return False
-
+        
         scaled_trajectory = self.scale_joint_trajectory_timing(
             joint_trajectory,
             speed_scale,
         )
-
         prepared_trajectory = self.prepare_joint_trajectory_for_execution(
             scaled_trajectory,
-            terminal_hold_sec=1,
+            terminal_hold_sec=0.5,
         )
-        
+
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = prepared_trajectory
         goal.goal_time_tolerance.sec = 2
@@ -346,7 +345,7 @@ class PandaArmControl:
         )
 
         self._node.get_logger().info(
-            "Trajectory timing: "
+            "Prepared trajectory timing: "
             f"points={len(prepared_trajectory.points)}, "
             f"final_time_sec="
             f"{prepared_trajectory.points[-1].time_from_start.sec + prepared_trajectory.points[-1].time_from_start.nanosec / 1e9:.3f}"
@@ -354,7 +353,7 @@ class PandaArmControl:
 
         final_point = prepared_trajectory.points[-1]
         self._node.get_logger().info(
-            f"Final trajectory point: "
+            "Prepared final trajectory point: "
             f"time={final_point.time_from_start.sec + final_point.time_from_start.nanosec / 1e9:.3f}, "
             f"velocities={list(final_point.velocities) if final_point.velocities else []}, "
             f"accelerations={list(final_point.accelerations) if final_point.accelerations else []}"

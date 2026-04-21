@@ -138,7 +138,7 @@ def build_moveit_config_dict(
         "plan_request_params": {
             "planning_pipeline": "ompl",
             "planner_id": "RRTConnectkConfigDefault",
-            "planning_attempts": 1,
+            "planning_attempts": 10,
             "planning_time": 5.0,
             "max_velocity_scaling_factor": 1.0,
             "max_acceleration_scaling_factor": 1.0,
@@ -169,7 +169,7 @@ def build_moveit_config_dict(
         "allow_trajectory_execution": True,
         "moveit_manage_controllers": False,
         "trajectory_execution.allowed_execution_duration_scaling": 1.2,
-        "trajectory_execution.allowed_goal_duration_margin": 0.5,
+        "trajectory_execution.allowed_goal_duration_margin": 0.6,
         "trajectory_execution.allowed_start_tolerance": 0.01,
         "moveit_controller_manager": (
             "moveit_simple_controller_manager/MoveItSimpleControllerManager"

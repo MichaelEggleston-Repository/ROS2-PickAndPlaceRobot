@@ -1,3 +1,4 @@
+# pick_place_robot/launch/sim.launch.py
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -34,6 +35,21 @@ def launch_setup(context, *args, **kwargs):
         "enable_calibration"
     ).perform(context)
 
+    world_filename = (
+        "my_world_calibration.sdf"
+        if enable_calibration_value == "true"
+        else "my_world.sdf"
+    )
+    world = os.path.join(pkg_share, "worlds", world_filename)
+
+    ros_gz_sim_share = get_package_share_directory("ros_gz_sim")
+    gz_launch = os.path.join(ros_gz_sim_share, "launch", "gz_sim.launch.py")
+
+    gz_sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(gz_launch),
+        launch_arguments={"gz_args": f"-r {world}"}.items(),
+    )
+
     robot_description = xacro.process_file(
         panda_urdf_xacro,
         mappings={"enable_calibration": enable_calibration_value},
@@ -51,25 +67,6 @@ def launch_setup(context, *args, **kwargs):
         ],
     )
 
-    remove_existing_panda = ExecuteProcess(
-        cmd=[
-            "gz",
-            "service",
-            "-s",
-            "/world/my_world/remove",
-            "--reqtype",
-            "gz.msgs.Entity",
-            "--reptype",
-            "gz.msgs.Boolean",
-            "--timeout",
-            "2000",
-            "--req",
-            'name: "panda", type: MODEL',
-        ],
-        output="screen",
-        shell=False,
-    )
-
     spawn_panda = ExecuteProcess(
         cmd=[
             "ros2",
@@ -77,7 +74,7 @@ def launch_setup(context, *args, **kwargs):
             "ros_gz_sim",
             "create",
             "-world",
-            "my_world",
+            "my_world_calibration" if enable_calibration_value == "true" else "my_world",
             "-name",
             "panda",
             "-string",
@@ -149,13 +146,6 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    spawn_panda_after_remove = RegisterEventHandler(
-        OnProcessExit(
-            target_action=remove_existing_panda,
-            on_exit=[spawn_panda],
-        )
-    )
-
     spawn_joint_state_broadcaster_after_robot = RegisterEventHandler(
         OnProcessExit(
             target_action=spawn_panda,
@@ -178,9 +168,9 @@ def launch_setup(context, *args, **kwargs):
     )
 
     return [
+        gz_sim,
         robot_state_publisher,
-        remove_existing_panda,
-        spawn_panda_after_remove,
+        spawn_panda,
         spawn_joint_state_broadcaster_after_robot,
         spawn_arm_controller_after_jsb,
         spawn_gripper_controller_after_arm,
@@ -197,12 +187,6 @@ def generate_launch_description():
     Returns:
         LaunchDescription: Full launch description for the simulated setup.
     """
-    pkg_share = get_package_share_directory("pick_place_robot")
-    world = os.path.join(pkg_share, "worlds", "my_world.sdf")
-
-    ros_gz_sim_share = get_package_share_directory("ros_gz_sim")
-    gz_launch = os.path.join(ros_gz_sim_share, "launch", "gz_sim.launch.py")
-
     clock_bridge = ExecuteProcess(
         cmd=[
             "ros2",
@@ -252,11 +236,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "enable_calibration",
                 default_value="false",
-                description="If true, include the calibration tag on panda_hand_tcp.",
-            ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(gz_launch),
-                launch_arguments={"gz_args": f"-r {world}"}.items(),
+                description="If true, include the calibration tag on panda_hand_tcp and load the calibration world.",
             ),
             clock_bridge,
             camera_info_bridge,
