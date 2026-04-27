@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = "pick_place_calibration"
+package_name = "pick_place_motion_planning"
 
 setup(
     name=package_name,
@@ -18,14 +18,14 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="Michael",
-    maintainer_email="you@example.com",
-    description="Vision and camera acquisition package for the pick and place robot project.",
-    license="TODO",
+    maintainer="michael",
+    maintainer_email="M.Eggleston0001@gmail.com",
+    description="Motion planning package for the pick and place robot project.",
+    license="TODO: License declaration",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "calibration_eye_to_hand = pick_place_calibration.calibration_eye_to_hand:main",
+            "panda_moveit_planner = pick_place_motion_planning.panda_moveit_planner:main",
         ],
     },
 )

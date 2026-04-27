@@ -1,7 +1,9 @@
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.callback_groups import CallbackGroup
 from copy import deepcopy
+import time
 
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -22,7 +24,7 @@ ARM_JOINT_NAMES = [
 ]
 
 class PandaArmControl:
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, callback_group: CallbackGroup | None = None):
         """
         Create a reusable Panda arm control helper attached to an existing ROS node.
 
@@ -40,6 +42,7 @@ class PandaArmControl:
             node,
             FollowJointTrajectory,
             "/joint_trajectory_controller/follow_joint_trajectory",
+            callback_group=callback_group,
         )
 
     def wait_for_server(self) -> bool:
@@ -192,21 +195,50 @@ class PandaArmControl:
         prepared_trajectory.points.append(hold_point)
 
         return prepared_trajectory
+    
+    def _wait_for_future(
+            self, 
+            future, 
+            timeout_sec: float, 
+            description: str,
+    ) -> bool:
+        
+        start_time = self._node.get_clock().now()
 
-    def send_goal(self, goal: FollowJointTrajectory.Goal):
-        """
-        Send an arm trajectory goal to the Panda arm controller.
+        while self._node.context.ok() and not future.done():
+            elapsed_sec = (self._node.get_clock().now() - start_time).nanoseconds / 1e9
 
-        Inputs:
-            goal: The prepared FollowJointTrajectory goal.
+            if elapsed_sec > timeout_sec:
+                self._node.get_logger().error(
+                    f"Timed out waiting for {description} after {timeout_sec:.1f} seconds."
+                )
+                return False
 
-        Returns:
-            The accepted goal handle if successful, otherwise None.
-        """
+            time.sleep(0.01)
+
+        return future.done()
+
+    def send_goal(
+        self,
+        goal: FollowJointTrajectory.Goal,
+        timeout_sec: float = 10.0,
+    ):
         self._node.get_logger().info("Sending arm goal to Panda arm controller...")
 
         send_goal_future = self._arm_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self._node, send_goal_future)
+
+        if not self._wait_for_future(
+            send_goal_future,
+            timeout_sec=timeout_sec,
+            description="arm goal acceptance",
+        ):
+            return None
+
+        if send_goal_future.exception() is not None:
+            self._node.get_logger().error(
+                f"Arm send-goal failed with exception: {send_goal_future.exception()}"
+            )
+            return None
 
         goal_handle = send_goal_future.result()
 
@@ -230,33 +262,22 @@ class PandaArmControl:
         goal_handle,
         timeout_sec: float = 120.0,
     ) -> bool:
-        """
-        Wait for an accepted Panda arm goal to finish executing.
-
-        Inputs:
-            goal_handle: The accepted ROS action goal handle returned by the server.
-            timeout_sec: Maximum time to wait for the action result.
-
-        Returns:
-            bool: True if the motion completed successfully, otherwise False.
-        """
         self._node.get_logger().info("Waiting for Panda arm motion to finish...")
 
         result_future = goal_handle.get_result_async()
-        start_time = self._node.get_clock().now()
 
-        while rclpy.ok() and not result_future.done():
-            rclpy.spin_once(self._node, timeout_sec=0.1)
+        if not self._wait_for_future(
+            result_future,
+            timeout_sec=timeout_sec,
+            description="arm motion result",
+        ):
+            return False
 
-            elapsed_sec = (
-                self._node.get_clock().now() - start_time
-            ).nanoseconds / 1e9
-
-            if elapsed_sec > timeout_sec:
-                self._node.get_logger().error(
-                    f"Timed out waiting for arm motion result after {timeout_sec:.1f} seconds."
-                )
-                return False
+        if result_future.exception() is not None:
+            self._node.get_logger().error(
+                f"Arm result future failed with exception: {result_future.exception()}"
+            )
+            return False
 
         result = result_future.result()
 

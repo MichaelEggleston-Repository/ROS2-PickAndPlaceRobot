@@ -1,12 +1,18 @@
 import rclpy
 from rclpy.node import Node
-from dataclasses import dataclass
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+
+import math
+import time
+import threading
+
+from std_msgs.msg import String
 
 from pick_place_robot.panda_arm_control import PandaArmControl
 from pick_place_robot.panda_gripper_control import PandaGripperControl
-from pick_place_robot.panda_moveit_planner import PandaMoveItPlanner
-from pick_place_robot.panda_scene_planning import PandaPlanningScene
-from pick_place_robot.task_space_pose import TaskSpacePose
+from pick_place_interfaces.srv import PlanToTaskPose, ExecuteTaskPose
+from pick_place_interfaces.msg import TaskSpacePose as TaskSpacePoseMsg
 
 class PandaCoordinatorNode(Node):
     def __init__(self):
@@ -23,10 +29,74 @@ class PandaCoordinatorNode(Node):
         super().__init__("panda_coordinator_node")
 
         # Attach reusable control objects to this coordinator node.
-        self._arm = PandaArmControl(self)
-        self._gripper = PandaGripperControl(self)
-        self._scene = PandaPlanningScene(self)
-        self._planner = PandaMoveItPlanner(self)
+        self._status_publisher = self.create_publisher(
+            String,
+            "panda_coordinator/status",
+            10,
+        )
+        self._status_timer = self.create_timer(
+            1.0,
+            self.publish_status,
+        )
+        self._status_text = "starting"
+
+        self._service_callback_group = ReentrantCallbackGroup()
+        self._planner_client_callback_group = ReentrantCallbackGroup()
+        self._arm_action_callback_group = ReentrantCallbackGroup()
+        self._gripper_action_callback_group = ReentrantCallbackGroup()
+
+        self._plan_to_task_pose_client = self.create_client(
+            PlanToTaskPose,
+            "plan_to_task_pose",
+            callback_group=self._planner_client_callback_group,
+        )
+        
+        self._execute_task_pose_service = self.create_service(
+            ExecuteTaskPose,
+            "execute_task_pose",
+            self.execute_task_pose_callback,
+            callback_group=self._service_callback_group,
+        )
+
+        self._arm = PandaArmControl(
+            self,
+            callback_group=self._arm_action_callback_group,
+        )
+
+        self._gripper = PandaGripperControl(
+            self,
+            callback_group=self._gripper_action_callback_group,
+        )
+
+
+        self._is_ready = False
+
+    def publish_status(self) -> None:
+        """
+        Publish the current coordinator status for other nodes.
+
+        Inputs:
+            None
+
+        Returns:
+            None
+        """
+        msg = String()
+        msg.data = self._status_text
+        self._status_publisher.publish(msg)
+
+    def set_status(self, status_text: str) -> None:
+        """
+        Update and immediately publish the coordinator status.
+
+        Inputs:
+            status_text: Human-readable coordinator status.
+
+        Returns:
+            None
+        """
+        self._status_text = status_text
+        self.publish_status()
         
     def wait_for_control_servers(self) -> bool:
         """
@@ -42,6 +112,102 @@ class PandaCoordinatorNode(Node):
         gripper_ready = self._gripper.wait_for_server()
         return arm_ready and gripper_ready
     
+    def is_ready(self) -> bool:
+        """
+        Report whether the coordinator is ready to accept robot requests.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if startup completed successfully, otherwise False.
+        """
+        return self._is_ready
+    
+    def require_ready(self) -> bool:
+        """
+        Check whether the coordinator is ready to process a request.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if ready, otherwise False.
+        """
+        if self._is_ready:
+            return True
+
+        self.get_logger().warn(
+            "Coordinator request rejected because startup sequence is not complete."
+        )
+        return False
+    
+    def wait_for_planner_service(self) -> bool:
+        """
+        Wait for the planner service to become available.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if the service became available, otherwise False.
+        """
+        self.get_logger().info("Waiting for plan_to_task_pose service...")
+
+        while rclpy.ok():
+            if self._plan_to_task_pose_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info("plan_to_task_pose service is available.")
+                return True
+
+            self.get_logger().info(
+                "plan_to_task_pose service not available yet, waiting again..."
+            )
+
+        return False
+
+    def execute_task_pose_callback(
+        self,
+        request: ExecuteTaskPose.Request,
+        response: ExecuteTaskPose.Response,
+    ) -> ExecuteTaskPose.Response:
+        """
+        Plan and execute motion to a requested task-space pose.
+
+        Inputs:
+            request: Execute-task-pose service request.
+            response: Execute-task-pose service response to populate.
+
+        Returns:
+            ExecuteTaskPose.Response: Populated execution result.
+        """
+        if not self.require_ready():
+            response.success = False
+            response.message = (
+                "Coordinator is not ready. Startup sequence is not complete."
+            )
+            return response
+        
+        self.get_logger().info(
+            f"execute_task_pose request received: "
+            f"x={request.pose.x:.3f}, y={request.pose.y:.3f}, z={request.pose.z:.3f}, "
+            f"roll={request.pose.roll:.3f}, pitch={request.pose.pitch:.3f}, yaw={request.pose.yaw:.3f}, "
+            f"speed_scale={request.speed_scale:.3f}"
+        )
+
+        success, message = self.plan_and_move_to_pose(
+            request.pose,
+            speed_scale=request.speed_scale,
+        )
+
+        response.success = success
+        response.message = message
+
+        self.get_logger().info(
+            f"execute_task_pose returning: success={response.success}, message='{response.message}'"
+        )
+
+        return response
+
     def run_startup_sequence(self) -> bool:
         """
         Run a simple first coordinated behavior:
@@ -59,16 +225,12 @@ class PandaCoordinatorNode(Node):
             self.get_logger().error("Coordinator failed during arm home motion.")
             return False
 
-        if not self._gripper.open_gripper():
-            self.get_logger().error("Coordinator failed during gripper open motion.")
-            return False
-
         self.get_logger().info("Coordinator motion sequence completed successfully.")
         return True
     
     def pose_to_orientation_xyzw(
         self,
-        pose: TaskSpacePose,
+        pose: TaskSpacePoseMsg,
     ) -> tuple[float, float, float, float]:
         """
         Convert a task-space pose orientation into a quaternion tuple.
@@ -80,13 +242,25 @@ class PandaCoordinatorNode(Node):
             tuple[float, float, float, float]:
                 Quaternion as (x, y, z, w).
         """
-        return self._planner.rpy_to_quaternion(
-            pose.roll,
-            pose.pitch,
-            pose.yaw,
-        )
+        half_roll = pose.roll * 0.5
+        half_pitch = pose.pitch * 0.5
+        half_yaw = pose.yaw * 0.5
+
+        cr = math.cos(half_roll)
+        sr = math.sin(half_roll)
+        cp = math.cos(half_pitch)
+        sp = math.sin(half_pitch)
+        cy = math.cos(half_yaw)
+        sy = math.sin(half_yaw)
+
+        qx = sr * cp * cy - cr * sp * sy
+        qy = cr * sp * cy + sr * cp * sy
+        qz = cr * cp * sy - sr * sp * cy
+        qw = cr * cp * cy + sr * sp * sy
+
+        return (qx, qy, qz, qw)
     
-    def create_grasp_pose(self, object_pose: TaskSpacePose) -> TaskSpacePose:
+    def create_grasp_pose(self, object_pose: TaskSpacePoseMsg) -> TaskSpacePoseMsg:
         """
         Create the grasp pose at the object.
 
@@ -94,9 +268,9 @@ class PandaCoordinatorNode(Node):
             object_pose: The detected object pose in task space.
 
         Returns:
-            TaskSpacePose: The grasp pose at object height.
+            TaskSpacePoseMsg: The grasp pose at object height.
         """
-        return TaskSpacePose(
+        return TaskSpacePoseMsg(
             x=object_pose.x,
             y=object_pose.y,
             z=object_pose.z,
@@ -113,7 +287,7 @@ class PandaCoordinatorNode(Node):
         roll: float = 3.14159,
         pitch: float = 0.0,
         yaw: float = 0.0,
-    ) -> TaskSpacePose:
+    ) -> TaskSpacePoseMsg:
         """
         Create the final place pose in task space.
 
@@ -126,9 +300,9 @@ class PandaCoordinatorNode(Node):
             yaw: Rotation about the z-axis in radians.
 
         Returns:
-            TaskSpacePose: The place pose for dropping the object.
+            TaskSpacePoseMsg: The place pose for dropping the object.
         """
-        return TaskSpacePose(
+        return TaskSpacePoseMsg(
             x=x,
             y=y,
             z=z,
@@ -137,7 +311,7 @@ class PandaCoordinatorNode(Node):
             yaw=yaw,
         )
     
-    def offset_pose_z(self, base_pose: TaskSpacePose, z_offset: float) -> TaskSpacePose:
+    def offset_pose_z(self, base_pose: TaskSpacePoseMsg, z_offset: float) -> TaskSpacePoseMsg:
         """
         Create a new task-space pose by offsetting an existing pose in z.
 
@@ -146,9 +320,9 @@ class PandaCoordinatorNode(Node):
             z_offset: The z offset to apply in meters.
 
         Returns:
-            TaskSpacePose: A new pose with the adjusted z value.
+            TaskSpacePoseMsg: A new pose with the adjusted z value.
         """
-        return TaskSpacePose(
+        return TaskSpacePoseMsg(
             x=base_pose.x,
             y=base_pose.y,
             z=base_pose.z + z_offset,
@@ -159,9 +333,9 @@ class PandaCoordinatorNode(Node):
     
     def create_pre_grasp_pose(
         self,
-        grasp_pose: TaskSpacePose,
+        grasp_pose: TaskSpacePoseMsg,
         z_offset: float = 0.10,
-    ) -> TaskSpacePose:
+    ) -> TaskSpacePoseMsg:
         """
         Create a safe approach pose above the grasp pose.
 
@@ -170,16 +344,16 @@ class PandaCoordinatorNode(Node):
             z_offset: Vertical offset above the grasp pose in meters.
 
         Returns:
-            TaskSpacePose: A pose above the grasp point for safe approach.
+            TaskSpacePoseMsg: A pose above the grasp point for safe approach.
         """
         # Approach from above to reduce the chance of colliding with the object or conveyor.
         return self.offset_pose_z(grasp_pose, z_offset)
 
     def create_lift_pose(
         self,
-        grasp_pose: TaskSpacePose,
+        grasp_pose: TaskSpacePoseMsg,
         z_offset: float = 0.12,
-    ) -> TaskSpacePose:
+    ) -> TaskSpacePoseMsg:
         """
         Create a lifted retreat pose above the grasp pose after the object is picked.
 
@@ -188,16 +362,16 @@ class PandaCoordinatorNode(Node):
             z_offset: Vertical retreat offset above the grasp pose in meters.
 
         Returns:
-            TaskSpacePose: A pose above the grasp point for safe retreat.
+            TaskSpacePoseMsg: A pose above the grasp point for safe retreat.
         """
         # Lift vertically before traveling so the object clears the surface safely.
         return self.offset_pose_z(grasp_pose, z_offset)
 
     def create_pre_place_pose(
         self,
-        place_pose: TaskSpacePose,
+        place_pose: TaskSpacePoseMsg,
         z_offset: float = 0.10,
-    ) -> TaskSpacePose:
+    ) -> TaskSpacePoseMsg:
         """
         Create a safe approach pose above the place pose.
 
@@ -206,16 +380,16 @@ class PandaCoordinatorNode(Node):
             z_offset: Vertical offset above the place pose in meters.
 
         Returns:
-            TaskSpacePose: A pose above the place point for safe approach.
+            TaskSpacePoseMsg: A pose above the place point for safe approach.
         """
         # Approach the placement point from above before descending to release.
         return self.offset_pose_z(place_pose, z_offset)
 
     def create_place_depart_pose(
         self,
-        place_pose: TaskSpacePose,
+        place_pose: TaskSpacePoseMsg,
         z_offset: float = 0.10,
-    ) -> TaskSpacePose:
+    ) -> TaskSpacePoseMsg:
         """
         Create a safe retreat pose above the place pose after releasing the object.
 
@@ -224,14 +398,61 @@ class PandaCoordinatorNode(Node):
             z_offset: Vertical retreat offset above the place pose in meters.
 
         Returns:
-            TaskSpacePose: A pose above the place point for safe departure.
+            TaskSpacePoseMsg: A pose above the place point for safe departure.
         """
         # Retreat upward after release to avoid brushing the placed object.
         return self.offset_pose_z(place_pose, z_offset)
     
-    def plan_to_pose(self, pose: TaskSpacePose) -> bool:
+    def request_plan_to_task_pose(
+        self,
+        pose: TaskSpacePoseMsg,
+        use_orientation_constraint: bool = False,
+        orientation_tolerance_rad: float = 1.0,
+    ) -> PlanToTaskPose.Response | None:
         """
-        Ask the planner for a motion to a task-space pose and log the result.
+        Request a joint-trajectory plan for a task-space pose from the planner service.
+
+        Inputs:
+            pose: Target task-space pose message.
+            use_orientation_constraint: True to request constrained planning.
+            orientation_tolerance_rad: Allowed orientation error in radians about
+                each axis when constrained planning is requested.
+
+        Returns:
+            PlanToTaskPose.Response | None: Service response if successful,
+            otherwise None.
+        """
+        request = PlanToTaskPose.Request()
+        request.pose = pose
+        request.use_orientation_constraint = use_orientation_constraint
+        request.orientation_tolerance_rad = orientation_tolerance_rad
+
+        future = self._plan_to_task_pose_client.call_async(request)
+
+        while rclpy.ok() and not future.done():
+            time.sleep(0.01)
+
+        if not future.done():
+            self.get_logger().warn("Plan-to-task-pose service call did not complete.")
+            return None
+
+        if future.exception() is not None:
+            self.get_logger().error(
+                f"Plan-to-task-pose service call raised an exception: {future.exception()}"
+            )
+            return None
+
+        response = future.result()
+
+        if response is None:
+            self.get_logger().warn("Plan-to-task-pose service returned no response.")
+            return None
+
+        return response
+    
+    def plan_to_pose(self, pose: TaskSpacePoseMsg) -> bool:
+        """
+        Request a plan to a task-space pose and log the result.
 
         Inputs:
             pose: The target end-effector pose in task space.
@@ -239,77 +460,104 @@ class PandaCoordinatorNode(Node):
         Returns:
             bool: True if planning succeeded, otherwise False.
         """
-        self.get_logger().info("Requesting a plan from the Panda planner...")
 
-        result = self._planner.plan_to_task_pose(pose)
+        if not self.require_ready():
+            return False
 
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
+        self.get_logger().info("Requesting a plan from the Panda planner service...")
 
-        if result.joint_trajectory is not None:
+        response = self.request_plan_to_task_pose(
+            pose,
+            use_orientation_constraint=False,
+        )
+
+        if response is None:
+            self.get_logger().error("Planning request failed because no response was received.")
+            return False
+
+        self.get_logger().info(f"Planning success: {response.success}")
+        self.get_logger().info(f"Planning message: {response.message}")
+
+        if response.joint_trajectory.points:
             self.get_logger().info(
-                f"Planned joint trajectory points: {len(result.joint_trajectory.points)}"
+                f"Planned joint trajectory points: {len(response.joint_trajectory.points)}"
             )
 
-        return result.success
+        return response.success
     
     def plan_and_move_to_pose(
         self,
-        pose: TaskSpacePose,
-    ) -> bool:
+        pose: TaskSpacePoseMsg,
+        speed_scale: float = 1.0,
+    ) -> tuple[bool, str]:
         """
-        Plan to a task-space pose and execute the returned joint trajectory.
+        Request a plan to a task-space pose and execute the returned joint trajectory.
 
         Inputs:
             pose: The target end-effector pose in task space.
+            speed_scale: Motion speed scale factor for trajectory execution.
 
         Returns:
-            bool: True if planning and execution both succeeded, otherwise False.
+            tuple[bool, str]:
+                Success flag and descriptive result message.
         """
+        if not self.require_ready():
+            return False, "Coordinator is not ready. Startup sequence is not complete."
+
         self.get_logger().info(
             "Requesting planning and arm execution for a task-space pose..."
         )
 
-        result = self._planner.plan_to_task_pose(pose)
+        response = self.request_plan_to_task_pose(
+            pose,
+            use_orientation_constraint=False,
+        )
 
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
+        if response is None:
+            message = "Cannot execute motion because no planning response was received."
+            self.get_logger().error(message)
+            return False, message
 
-        if not result.success:
-            self.get_logger().error("Cannot execute motion because planning failed.")
-            return False
+        self.get_logger().info(f"Planning success: {response.success}")
+        self.get_logger().info(f"Planning message: {response.message}")
 
-        if result.joint_trajectory is None:
-            self.get_logger().error(
-                "Cannot execute motion because no joint trajectory was returned."
-            )
-            return False
+        if not response.success:
+            message = "Cannot execute motion because planning failed."
+            self.get_logger().error(message)
+            return False, message
+
+        if not response.joint_trajectory.points:
+            message = "Cannot execute motion because no joint trajectory was returned."
+            self.get_logger().error(message)
+            return False, message
 
         self.get_logger().info(
             f"Executing planned joint trajectory with "
-            f"{len(result.joint_trajectory.points)} points."
+            f"{len(response.joint_trajectory.points)} points."
         )
 
         motion_succeeded = self._arm.move_to_joint_trajectory(
-            result.joint_trajectory,
-            speed_scale=1.0
+            response.joint_trajectory,
+            speed_scale=speed_scale,
         )
 
         if not motion_succeeded:
-            self.get_logger().error("Arm motion failed after successful planning.")
-            return False
+            message = "Arm motion failed after successful planning."
+            self.get_logger().error(message)
+            return False, message
 
-        self.get_logger().info("Planned arm motion completed successfully.")
-        return True
+        message = "Planned arm motion completed successfully."
+        self.get_logger().info(message)
+        return True, message
     
     def plan_and_move_to_pose_with_orientation_constraint(
         self,
-        pose: TaskSpacePose,
+        pose: TaskSpacePoseMsg,
         orientation_tolerance_rad: float = 1.0,
     ) -> bool:
         """
-        Plan to a task-space pose with an orientation path constraint and
-        execute the returned joint trajectory.
+        Request a constrained plan to a task-space pose and execute the returned
+        joint trajectory.
 
         Inputs:
             pose: The target end-effector pose in task space.
@@ -319,25 +567,35 @@ class PandaCoordinatorNode(Node):
         Returns:
             bool: True if planning and execution both succeeded, otherwise False.
         """
+        if not self.require_ready():
+            return False
+        
         self.get_logger().info(
             "Requesting constrained planning and arm execution for a task-space pose..."
         )
 
-        result = self._planner.plan_to_task_pose_with_orientation_constraint(
+        response = self.request_plan_to_task_pose(
             pose,
+            use_orientation_constraint=True,
             orientation_tolerance_rad=orientation_tolerance_rad,
         )
 
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
+        if response is None:
+            self.get_logger().error(
+                "Cannot execute motion because no constrained planning response was received."
+            )
+            return False
 
-        if not result.success:
+        self.get_logger().info(f"Planning success: {response.success}")
+        self.get_logger().info(f"Planning message: {response.message}")
+
+        if not response.success:
             self.get_logger().error(
                 "Cannot execute motion because constrained planning failed."
             )
             return False
 
-        if result.joint_trajectory is None:
+        if not response.joint_trajectory.points:
             self.get_logger().error(
                 "Cannot execute motion because no joint trajectory was returned."
             )
@@ -345,12 +603,12 @@ class PandaCoordinatorNode(Node):
 
         self.get_logger().info(
             f"Executing planned joint trajectory with "
-            f"{len(result.joint_trajectory.points)} points."
+            f"{len(response.joint_trajectory.points)} points."
         )
 
         motion_succeeded = self._arm.move_to_joint_trajectory(
-            result.joint_trajectory,
-            speed_scale=1.0
+            response.joint_trajectory,
+            speed_scale=1.0,
         )
 
         if not motion_succeeded:
@@ -362,198 +620,109 @@ class PandaCoordinatorNode(Node):
         self.get_logger().info("Constrained planned arm motion completed successfully.")
         return True
     
-    def execute_pick_and_place_for_pose(
-        self,
-        object_id: str,
-        object_pose: TaskSpacePose,
-        place_pose: TaskSpacePose,
-    ) -> bool:
+    def create_planning_smoke_test_pose(self) -> TaskSpacePoseMsg:
         """
-        Execute a pick-and-place sequence for a provided object pose and place pose.
-
-        Inputs:
-            object_id: Planning-scene object name.
-            object_pose: Task-space pose of the object to pick.
-            place_pose: Task-space pose where the object should be placed.
-
-        Returns:
-            bool: True if the full pick-and-place sequence succeeded, otherwise False.
-        """
-        self.get_logger().info(
-            f"Starting pick-and-place sequence for object '{object_id}'."
-        )
-
-        grasp_pose = self.create_grasp_pose(object_pose)
-        pre_grasp_pose = self.create_pre_grasp_pose(grasp_pose, 0.05)
-        lift_pose = self.create_lift_pose(grasp_pose, 0.10)
-        pre_place_pose = self.create_pre_place_pose(place_pose, 0.05)
-        place_depart_pose = self.create_place_depart_pose(place_pose, 0.10)
-
-        placed_object_orientation = self.pose_to_orientation_xyzw(place_pose)
-
-        self.get_logger().info(f"Moving to {object_id} pre-grasp pose...")
-        if not self.plan_and_move_to_pose(pre_grasp_pose):
-            self.get_logger().error(f"{object_id} pre-grasp motion failed.")
-            return False
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self.get_logger().info(
-            f"Moving to {object_id} grasp pose with orientation constraint..."
-        )
-        if not self.plan_and_move_to_pose_with_orientation_constraint(
-            grasp_pose,
-            orientation_tolerance_rad=1.0,
-        ):
-            self.get_logger().error(f"{object_id} constrained grasp motion failed.")
-            return False
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        if not self._gripper.close_gripper():
-            self.get_logger().error(f"{object_id} gripper close motion failed.")
-            return False
-
-        self._scene.remove_collision_object(object_id)
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self._scene.attach_box_to_link(
-            object_id=object_id,
-            link_name="panda_hand",
-            size_xyz=(0.05, 0.05, 0.05),
-            position_xyz=(0.0, 0.0, 0.10),
-            orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
-            touch_links=["panda_hand", "panda_leftfinger", "panda_rightfinger"],
-        )
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self.get_logger().info(f"Moving to {object_id} lift pose with orientation constraint...")
-        if not self.plan_and_move_to_pose_with_orientation_constraint(
-            lift_pose,
-            orientation_tolerance_rad=1.0,
-        ):
-            self.get_logger().error(f"{object_id} constrained lift motion failed.")
-            return False
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self.get_logger().info(f"Moving to {object_id} pre-place pose...")
-        if not self.plan_and_move_to_pose(pre_place_pose):
-            self.get_logger().error(f"{object_id} pre-place motion failed.")
-            return False
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self.get_logger().info(f"Moving to {object_id} place pose with orientation constraint...")
-        if not self.plan_and_move_to_pose_with_orientation_constraint(
-            place_pose,
-            orientation_tolerance_rad=1.0,
-        ):
-            self.get_logger().error(f"{object_id} constrained place motion failed.")
-            return False
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self._scene.detach_object(object_id, "panda_hand")
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        self._scene.add_box_collision_object(
-            object_id=object_id,
-            size_xyz=(0.05, 0.05, 0.05),
-            position_xyz=(place_pose.x, place_pose.y, place_pose.z),
-            orientation_xyzw=placed_object_orientation,
-            frame_id="world",
-        )
-
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        if not self._gripper.open_gripper():
-            self.get_logger().error(f"{object_id} gripper open motion failed.")
-            return False
-
-        self.get_logger().info(f"Moving to {object_id} place-depart pose...")
-        if not self.plan_and_move_to_pose(place_depart_pose):
-            self.get_logger().error(f"{object_id} place-depart motion failed.")
-            return False
-
-        self.get_logger().info(
-            f"Pick-and-place sequence for object '{object_id}' completed successfully."
-        )
-        return True
-    
-    def run_cube_2_pick_approach_test(self) -> bool:
-        """
-        Run a smoke test for cube_2 using a hardcoded object pose and place pose.
+        Create a simple task-space pose for planner/coordinator integration testing.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the smoke test sequence succeeded, otherwise False.
+            TaskSpacePoseMsg: A reachable test pose for basic planning validation.
         """
-        cube_2_object_pose = TaskSpacePose(
-            x=0.500,
-            y=0.000,
-            z=0.425,
+        return TaskSpacePoseMsg(
+            x=0.45,
+            y=0.00,
+            z=0.55,
             roll=3.14159,
             pitch=0.0,
             yaw=0.0,
         )
 
-        place_pose = self.create_place_pose(
-            x=0.35,
-            y=0.00,
-            z=0.425,
-            roll=3.14159,
-            pitch=0.0,
-            yaw=0.7854,
+    def run_planning_smoke_test(self) -> bool:
+        """
+        Run a simple planner/coordinator integration smoke test.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if the test motion completed successfully, otherwise False.
+        """
+        test_pose = self.create_planning_smoke_test_pose()
+
+        self.get_logger().info("Starting planner/coordinator smoke test...")
+
+        motion_succeeded = self.plan_and_move_to_pose(test_pose)
+
+        if not motion_succeeded:
+            self.get_logger().error(
+                "Planner/coordinator smoke test failed."
+            )
+            return False
+
+        self.get_logger().info(
+            "Planner/coordinator smoke test completed successfully."
         )
-
-        self.get_logger().info("Starting cube_2 pick-and-place smoke test...")
-
-        self._scene.republish_static_environment()
-        self._scene.add_cube_1_collision_object()
-        self._scene.add_cube_2_collision_object()
-        self._scene.add_cube_3_collision_object()
-
-        return self.execute_pick_and_place_for_pose(
-            object_id="cube_2",
-            object_pose=cube_2_object_pose,
-            place_pose=place_pose,
-        )
+        return True
 
 def main(args=None):
-    """
-    Start the Panda coordinator node, check both control servers, and shut down cleanly.
-
-    Inputs:
-        args: Optional ROS argument list.
-
-    Returns:
-        None
-    """
-    # Initialize ROS before creating any nodes.
     rclpy.init(args=args)
-
     node = PandaCoordinatorNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    spin_thread = None
 
-    servers_ready = node.wait_for_control_servers()
+    try:
+        executor.add_node(node)
 
-    if servers_ready:
-        node.get_logger().info("Coordinator setup succeeded. Arm and gripper are ready.")
+        spin_thread = threading.Thread(
+            target=executor.spin,
+            name="panda_coordinator_executor",
+            daemon=True,
+        )
+        spin_thread.start()
+
+        node.set_status("starting")
+
+        control_servers_ready = node.wait_for_control_servers()
+        if not control_servers_ready:
+            node.get_logger().error(
+                "Coordinator setup failed because one or more control servers are unavailable."
+            )
+            node.set_status("error:control_servers_unavailable")
+            return
+
+        planner_service_ready = node.wait_for_planner_service()
+        if not planner_service_ready:
+            node.get_logger().error(
+                "Coordinator setup failed because the planner service is unavailable."
+            )
+            node.set_status("error:planner_service_unavailable")
+            return
 
         sequence_succeeded = node.run_startup_sequence()
-
-        if sequence_succeeded:
-            node.run_cube_2_pick_approach_test()
-        else:
+        if not sequence_succeeded:
             node.get_logger().error("Coordinator startup sequence failed.")
-    else:
-        node.get_logger().error("Coordinator setup failed because one or more servers are unavailable.")
+            node.set_status("error:startup_sequence_failed")
+            return
 
-    # Clean shutdown keeps the node lifecycle tidy.
-    node.destroy_node()
-    rclpy.shutdown()
+        node._is_ready = True
+        node.set_status("ready")
+        node.get_logger().info(
+            "Coordinator is ready. Startup sequence completed successfully."
+        )
+
+        while rclpy.ok():
+            time.sleep(0.5)
+    finally:
+        executor.shutdown()
+
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
+
+        node.destroy_node()
+        rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

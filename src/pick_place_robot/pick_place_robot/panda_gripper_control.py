@@ -1,6 +1,8 @@
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.callback_groups import CallbackGroup
+import time
 
 from control_msgs.action import FollowJointTrajectory
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -17,7 +19,7 @@ GRIPPER_JOINT_NAMES = [
 ]
 
 class PandaGripperControl:
-    def __init__(self, node: Node):
+    def __init__(self, node: Node, callback_group: CallbackGroup | None = None):
         """
         Create a reusable Panda gripper control helper attached to an existing ROS node.
 
@@ -35,6 +37,7 @@ class PandaGripperControl:
             node,
             FollowJointTrajectory,
             "/gripper_trajectory_controller/follow_joint_trajectory",
+            callback_group=callback_group,
         )
 
     def wait_for_server(self) -> bool:
@@ -57,6 +60,22 @@ class PandaGripperControl:
 
         self._node.get_logger().info("Panda gripper action server is ready.")
         return True
+    
+    def _wait_for_future(self, future, timeout_sec: float, description: str) -> bool:
+        start_time = self._node.get_clock().now()
+
+        while self._node.context.ok() and not future.done():
+            elapsed_sec = (self._node.get_clock().now() - start_time).nanoseconds / 1e9
+
+            if elapsed_sec > timeout_sec:
+                self._node.get_logger().error(
+                    f"Timed out waiting for {description} after {timeout_sec:.1f} seconds."
+                )
+                return False
+
+            time.sleep(0.01)
+
+        return future.done()
 
     def create_goal(
         self,
@@ -83,20 +102,27 @@ class PandaGripperControl:
         goal.trajectory.points.append(point)
         return goal
 
-    def send_goal(self, goal: FollowJointTrajectory.Goal):
-        """
-        Send a gripper trajectory goal to the Panda gripper controller.
-
-        Inputs:
-            goal: The prepared FollowJointTrajectory goal.
-
-        Returns:
-            The accepted goal handle if successful, otherwise None.
-        """
+    def send_goal(
+        self,
+        goal: FollowJointTrajectory.Goal,
+        timeout_sec: float = 10.0,
+    ):
         self._node.get_logger().info("Sending gripper goal to Panda gripper controller...")
 
         send_goal_future = self._gripper_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self._node, send_goal_future)
+
+        if not self._wait_for_future(
+            send_goal_future,
+            timeout_sec=timeout_sec,
+            description="gripper goal acceptance",
+        ):
+            return None
+
+        if send_goal_future.exception() is not None:
+            self._node.get_logger().error(
+                f"Gripper send-goal failed with exception: {send_goal_future.exception()}"
+            )
+            return None
 
         goal_handle = send_goal_future.result()
 
@@ -115,20 +141,23 @@ class PandaGripperControl:
         self._node.get_logger().info("Gripper goal was accepted by the action server.")
         return goal_handle
 
-    def wait_for_result(self, goal_handle) -> bool:
-        """
-        Wait for an accepted Panda gripper goal to finish executing.
-
-        Inputs:
-            goal_handle: The accepted ROS action goal handle returned by the server.
-
-        Returns:
-            bool: True if the motion completed successfully, otherwise False.
-        """
+    def wait_for_result(self, goal_handle, timeout_sec: float = 30.0) -> bool:
         self._node.get_logger().info("Waiting for Panda gripper motion to finish...")
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self._node, result_future)
+
+        if not self._wait_for_future(
+            result_future,
+            timeout_sec=timeout_sec,
+            description="gripper motion result",
+        ):
+            return False
+
+        if result_future.exception() is not None:
+            self._node.get_logger().error(
+                f"Gripper result future failed with exception: {result_future.exception()}"
+            )
+            return False
 
         result = result_future.result()
 

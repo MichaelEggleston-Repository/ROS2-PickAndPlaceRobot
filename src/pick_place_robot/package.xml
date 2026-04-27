@@ -17,6 +17,8 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
 
+  <depend>pick_place_motion_planning</depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

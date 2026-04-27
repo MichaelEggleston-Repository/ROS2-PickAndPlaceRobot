@@ -1,13 +1,8 @@
 import rclpy
 from rclpy.node import Node
-import select
-import sys
 from dataclasses import dataclass
-
-from pick_place_robot.panda_arm_control import PandaArmControl
-from pick_place_robot.panda_moveit_planner import PandaMoveItPlanner
-from pick_place_robot.panda_scene_planning import PandaPlanningScene
-from pick_place_robot.task_space_pose import TaskSpacePose
+from pick_place_interfaces.msg import TaskSpacePose as TaskSpacePoseMsg
+from pick_place_interfaces.srv import ExecuteTaskPose
 
 @dataclass
 class CalibrationSequenceStep:
@@ -23,60 +18,61 @@ class CalibrationSequenceStep:
         None
     """
     name: str
-    pose: TaskSpacePose
+    pose: TaskSpacePoseMsg
     is_image_pose: bool
 
-class CalibrationPoseSweepNode(Node):
-    def __init__(self):
+class CalibrationPoseSweep:
+    def __init__(self, node: Node):
         """
-        Create a calibration pose sweep node for robot-guided camera visibility checks.
+        Create a reusable calibration pose sweep helper.
 
         Inputs:
-            None
+            node: Parent ROS node that owns logging, subscriptions, and clients.
 
         Returns:
             None
         """
-        super().__init__("calibration_pose_sweep_node")
+        self._node = node
 
-        # Keep calibration motion logic separate from the main pick-and-place coordinator.
-        self._arm = PandaArmControl(self)
-        self._planner = PandaMoveItPlanner(self)
-        self._scene = PandaPlanningScene(self)
-
-        self.get_logger().info("Calibration pose sweep node started.")
+        self._execute_task_pose_client = self._node.create_client(
+            ExecuteTaskPose,
+            "execute_task_pose",
+        )
 
         self._calibration_sequence = self.create_calibration_sequence()
-
-        self.get_logger().info(
-            f"Loaded {len(self._calibration_sequence)} sequenced calibration steps."
-        )
 
         self._pose_failure_counts: dict[str, int] = {}
         self._pose_success_counts: dict[str, int] = {}
 
-    def wait_for_control_interfaces(self) -> bool:
+        self._node.get_logger().info("Calibration pose sweep helper ready.")
+        self._node.get_logger().info(
+            f"Loaded {len(self._calibration_sequence)} sequenced calibration steps."
+        )
+
+    def wait_for_execute_task_pose_service(self) -> bool:
         """
-        Wait for the required robot control interfaces to become available.
+        Wait for the coordinator execute-task-pose service to become available.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the required interfaces are available, otherwise False.
+            bool: True if the service became available, otherwise False.
         """
-        arm_ready = self._arm.wait_for_server()
+        self._node.get_logger().info("Waiting for execute_task_pose service...")
 
-        if not arm_ready:
-            self.get_logger().error(
-                "Calibration pose sweep setup failed because the arm server is unavailable."
+        while rclpy.ok():
+            if self._execute_task_pose_client.wait_for_service(timeout_sec=1.0):
+                self._node.get_logger().info(
+                    "execute_task_pose service is available."
+                )
+                return True
+
+            self._node.get_logger().info(
+                "execute_task_pose service not available yet, waiting again..."
             )
-            return False
 
-        self.get_logger().info(
-            "Calibration pose sweep setup succeeded. Arm control is ready."
-        )
-        return True
+        return False
     
     def create_calibration_sequence(self) -> list[CalibrationSequenceStep]:
         """
@@ -92,7 +88,7 @@ class CalibrationPoseSweepNode(Node):
         return [
             CalibrationSequenceStep(
                 name="intermediate_1",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.427,
                     y=0.003,
                     z=0.517,
@@ -104,7 +100,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_1",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.438,
                     y=0.107,
                     z=0.905,
@@ -116,7 +112,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_2",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.478,
                     y=0.073,
                     z=1.106,
@@ -128,7 +124,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_3",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.670,
                     y=0.105,
                     z=0.833,
@@ -140,7 +136,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="intermediate_2",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.507,
                     y=0.368,
                     z=0.991,
@@ -152,7 +148,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="intermediate_3",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.587,
                     y=0.217,
                     z=0.992,
@@ -164,7 +160,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_4",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.612,
                     y=0.131,
                     z=0.992,
@@ -176,7 +172,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="intermediate_4",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.437,
                     y=0.155,
                     z=1.154,
@@ -188,7 +184,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_5",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.462,
                     y=0.049,
                     z=1.154,
@@ -200,7 +196,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_6",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.461,
                     y=-0.064,
                     z=1.153,
@@ -212,7 +208,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_7",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.546,
                     y=0.019,
                     z=1.039,
@@ -224,7 +220,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_8",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.630,
                     y=-0.028,
                     z=1.023,
@@ -236,7 +232,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_9",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.607,
                     y=0.169,
                     z=1.023,
@@ -248,7 +244,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_10",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.589,
                     y=-0.090,
                     z=0.975,
@@ -260,7 +256,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_11",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.433,
                     y=-0.085,
                     z=1.018,
@@ -272,7 +268,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_12",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.537,
                     y=-0.069,
                     z=0.905,
@@ -284,7 +280,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_13",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.535,
                     y=0.080,
                     z=0.905,
@@ -296,7 +292,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="intermediate_before_image_14",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.620,
                     y=0.074,
                     z=0.820,
@@ -308,7 +304,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_14",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.667,
                     y=0.074,
                     z=0.744,
@@ -320,7 +316,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_15",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.691,
                     y=0.221,
                     z=0.695,
@@ -332,7 +328,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_16",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.570,
                     y=0.223,
                     z=0.775,
@@ -344,7 +340,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_17",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.592,
                     y=-0.156,
                     z=0.775,
@@ -356,7 +352,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_18",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.553,
                     y=-0.137,
                     z=0.910,
@@ -368,7 +364,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_19",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.712,
                     y=0.023,
                     z=0.886,
@@ -380,7 +376,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_20",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.696,
                     y=-0.151,
                     z=0.887,
@@ -392,7 +388,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="intermediate_5",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.379,
                     y=-0.123,
                     z=1.142,
@@ -404,7 +400,7 @@ class CalibrationPoseSweepNode(Node):
             ),
             CalibrationSequenceStep(
                 name="image_21",
-                pose=TaskSpacePose(
+                pose=TaskSpacePoseMsg(
                     x=0.496,
                     y=-0.081,
                     z=1.107,
@@ -415,365 +411,102 @@ class CalibrationPoseSweepNode(Node):
                 is_image_pose=True,
             ),
         ]
-
-    def create_candidate_calibration_poses(self) -> list[TaskSpacePose]:
-        """
-        Create an initial set of candidate TCP poses for calibration target visibility checks.
-
-        Inputs:
-            None
-
-        Returns:
-            list[TaskSpacePose]: Candidate task-space poses to test in the camera view.
-        """
-        # Start with a small manual sweep above the conveyor so pose tuning stays simple.
-        return [
-            TaskSpacePose(
-                x=0.571,
-                y=-0.229,
-                z=0.862,
-                roll=-0.483,
-                pitch=0.003,
-                yaw=-0.914,
-            ),
-            TaskSpacePose(
-                x=0.40,
-                y=-0.05,
-                z=0.55,
-                roll=3.14159,
-                pitch=0.0,
-                yaw=-0.2,
-            ),
-            TaskSpacePose(
-                x=0.45,
-                y=0.00,
-                z=0.55,
-                roll=3.14159,
-                pitch=0.0,
-                yaw=0.0,
-            ),
-            TaskSpacePose(
-                x=0.40,
-                y=0.05,
-                z=0.55,
-                roll=3.14159,
-                pitch=0.0,
-                yaw=0.2,
-            ),
-            TaskSpacePose(
-                x=0.35,
-                y=0.10,
-                z=0.55,
-                roll=3.14159,
-                pitch=0.0,
-                yaw=0.4,
-            ),
-        ]
     
-    def execute_calibration_sequence(
-        self,
-        speed_scale: float = 0.25,
-    ) -> bool:
+    def get_calibration_sequence(self) -> list[CalibrationSequenceStep]:
         """
-        Execute the ordered calibration route step by step.
-
-        Inputs:
-            speed_scale: Motion speed scale factor used during execution.
-
-        Returns:
-            bool: True if the full sequence completed successfully, otherwise False.
-        """
-        if not self._calibration_sequence:
-            self.get_logger().error(
-                "Cannot execute calibration sequence because no steps were loaded."
-            )
-            return False
-
-        self.get_logger().info(
-            f"Starting calibration sequence with "
-            f"{len(self._calibration_sequence)} steps."
-        )
-
-        for index, step in enumerate(self._calibration_sequence, start=1):
-            step_type = "image" if step.is_image_pose else "intermediate"
-
-            self.get_logger().info(
-                f"Executing calibration step {index}/{len(self._calibration_sequence)}: "
-                f"{step.name} ({step_type})"
-            )
-
-            motion_succeeded = self.move_to_pose(
-                step.pose,
-                speed_scale=speed_scale,
-                pose_name=step.name,
-            )
-
-            if not motion_succeeded:
-                self.get_logger().error(
-                    f"Calibration sequence failed at step '{step.name}'."
-                )
-                self._pose_failure_counts[step.name] = (
-                    self._pose_failure_counts.get(step.name, 0) + 1
-                )
-
-                self.get_logger().warn(
-                    f"Pose statistics so far for '{step.name}': "
-                    f"successes={self._pose_success_counts.get(step.name, 0)}, "
-                    f"failures={self._pose_failure_counts.get(step.name, 0)}"
-                )
-                return False
-
-            if step.is_image_pose:
-                self.get_logger().info(
-                    f"Reached image pose '{step.name}'."
-                )
-            
-            self._pose_success_counts[step.name] = (
-                self._pose_success_counts.get(step.name, 0) + 1
-            )
-
-        self.get_logger().info(
-            "Calibration sequence completed successfully."
-        )
-        return True
-
-    def run_startup_sequence(self) -> bool:
-        """
-        Move the Panda arm to a known-safe home pose before calibration testing.
+        Return the ordered calibration sequence.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the startup motion succeeded, otherwise False.
+            list[CalibrationSequenceStep]: Loaded calibration sequence steps.
         """
-        self.get_logger().info(
-            "Starting calibration pose sweep startup sequence..."
-        )
+        return self._calibration_sequence
 
-        self._scene.republish_static_environment()
-        rclpy.spin_once(self, timeout_sec=0.2)
-
-        if not self._arm.move_home():
-            self.get_logger().error(
-                "Calibration pose sweep startup sequence failed during arm home motion."
-            )
-            return False
-
-        self.get_logger().info(
-            "Calibration pose sweep startup sequence completed successfully."
-        )
-        return True
-
-    def move_to_pose(
+    def move_to_sequence_step(
         self,
-        target_pose: TaskSpacePose,
+        step: CalibrationSequenceStep,
         speed_scale: float = 0.25,
-        pose_name: str = "unnamed_pose",
     ) -> bool:
         """
-        Plan and execute motion to one calibration pose.
+        Request motion to one calibration sequence step through the coordinator.
 
         Inputs:
-            target_pose: The target TCP pose for calibration testing.
-            speed_scale: Motion speed scale factor used during execution.
+            step: The calibration sequence step to execute.
+            speed_scale: Motion speed scale factor for the requested move.
 
         Returns:
-            bool: True if planning and execution both succeeded, otherwise False.
+            bool: True if the move request succeeded, otherwise False.
         """
-        self.get_logger().info(
-            "Planning calibration pose: "
-            f"x={target_pose.x:.3f}, "
-            f"y={target_pose.y:.3f}, "
-            f"z={target_pose.z:.3f}, "
-            f"roll={target_pose.roll:.3f}, "
-            f"pitch={target_pose.pitch:.3f}, "
-            f"yaw={target_pose.yaw:.3f}"
+        self._node.get_logger().info(
+            f"Calibration pose sweep requested move to step '{step.name}'."
         )
 
-        result = self._planner.plan_to_task_pose(target_pose)
-
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
-
-        if not result.success:
-            self.get_logger().error(
-            f"Calibration pose '{pose_name}' failed because planning did not succeed."
-        )
-            return False
-
-        if result.joint_trajectory is None:
-            self.get_logger().error(
-                "Calibration pose motion failed because no joint trajectory was returned."
+        if not self._execute_task_pose_client.wait_for_service(timeout_sec=1.0):
+            self._node.get_logger().error(
+                "execute_task_pose service is no longer available."
             )
             return False
 
-        motion_succeeded = self._arm.move_to_joint_trajectory(
-            result.joint_trajectory,
-            speed_scale=speed_scale,
+        request = ExecuteTaskPose.Request()
+        request.pose = step.pose
+        request.speed_scale = speed_scale
+
+        self._node.get_logger().info(
+            f"Sending execute_task_pose request for step '{step.name}'."
         )
 
-        if not motion_succeeded:
-            self.get_logger().error(
-                f"Calibration pose '{pose_name}' failed during arm trajectory execution."
-            )
-            return False
+        future = self._execute_task_pose_client.call_async(request)
 
-        self.get_logger().info("Calibration pose motion completed successfully.")
-        return True
-
-    def move_to_first_candidate_pose(self) -> bool:
-        """
-        Plan and execute motion to the first candidate calibration pose.
-
-        Inputs:
-            None
-
-        Returns:
-            bool: True if planning and execution both succeeded, otherwise False.
-        """
-        if not self._candidate_poses:
-            self.get_logger().error(
-                "Cannot move to a calibration pose because no candidate poses were loaded."
-            )
-            return False
-
-        target_pose = self._candidate_poses[0]
-
-        self.get_logger().info(
-            "Testing first candidate calibration pose: "
-            f"x={target_pose.x:.3f}, "
-            f"y={target_pose.y:.3f}, "
-            f"z={target_pose.z:.3f}, "
-            f"roll={target_pose.roll:.3f}, "
-            f"pitch={target_pose.pitch:.3f}, "
-            f"yaw={target_pose.yaw:.3f}"
+        self._node.get_logger().info(
+            f"Waiting for execute_task_pose response for step '{step.name}'."
         )
 
-        result = self._planner.plan_to_task_pose(target_pose)
+        rclpy.spin_until_future_complete(self._node, future)
 
-        self.get_logger().info(f"Planning success: {result.success}")
-        self.get_logger().info(f"Planning message: {result.message}")
-
-        if not result.success:
-            self.get_logger().error(
-                "Calibration pose test failed because planning did not succeed."
+        if future.exception() is not None:
+            self._node.get_logger().error(
+                f"execute_task_pose future for step '{step.name}' raised: {future.exception()}"
             )
-            return False
 
-        if result.joint_trajectory is None:
-            self.get_logger().error(
-                "Calibration pose test failed because no joint trajectory was returned."
-            )
-            return False
-
-        self.get_logger().info(
-            f"Executing first calibration pose trajectory with "
-            f"{len(result.joint_trajectory.points)} points."
+        self._node.get_logger().info(
+            f"Finished waiting for execute_task_pose response for step '{step.name}'. "
+            f"done={future.done()}"
         )
 
-        motion_succeeded = self._arm.move_to_joint_trajectory(
-            result.joint_trajectory,
-            speed_scale=0.25,
-        )
-
-        if not motion_succeeded:
-            self.get_logger().error(
-                "Calibration pose test failed during arm trajectory execution."
+        if not future.done():
+            self._node.get_logger().warn(
+                f"Move request for step '{step.name}' did not complete."
+            )
+            self._pose_failure_counts[step.name] = (
+                self._pose_failure_counts.get(step.name, 0) + 1
             )
             return False
 
-        self.get_logger().info(
-            "First candidate calibration pose completed successfully."
+        response = future.result()
+
+        if response is None:
+            self._node.get_logger().warn(
+                f"Move request for step '{step.name}' returned no response."
+            )
+            self._pose_failure_counts[step.name] = (
+                self._pose_failure_counts.get(step.name, 0) + 1
+            )
+            return False
+
+        self._node.get_logger().info(
+            f"Move request result for '{step.name}': "
+            f"success={response.success}, message='{response.message}'"
+        )
+
+        if not response.success:
+            self._pose_failure_counts[step.name] = (
+                self._pose_failure_counts.get(step.name, 0) + 1
+            )
+            return False
+
+        self._pose_success_counts[step.name] = (
+            self._pose_success_counts.get(step.name, 0) + 1
         )
         return True
-
-
-def main(args=None):
-    """
-    Start the calibration pose sweep node and keep it available for manual homing
-    and sequenced calibration execution.
-
-    Inputs:
-        args: Optional ROS argument list.
-
-    Returns:
-        None
-    """
-    rclpy.init(args=args)
-
-    node = CalibrationPoseSweepNode()
-
-    try:
-        interfaces_ready = node.wait_for_control_interfaces()
-
-        if not interfaces_ready:
-            raise SystemExit(1)
-
-        startup_succeeded = node.run_startup_sequence()
-
-        if not startup_succeeded:
-            raise SystemExit(1)
-
-        node.get_logger().info(
-            "Calibration pose sweep node is ready for manual RViz pose testing."
-        )
-        node.get_logger().info(
-            "Press Enter to command home, or type 's' and press Enter to run the saved calibration sequence."
-        )
-
-        while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec=0.1)
-
-            if not sys.stdin.isatty():
-                continue
-
-            ready_streams, _, _ = select.select([sys.stdin], [], [], 0.0)
-
-            if not ready_streams:
-                continue
-
-            line = sys.stdin.readline().strip().lower()
-
-            if line == "":
-                node.get_logger().info(
-                    "Manual home request received from terminal input."
-                )
-
-                if not node.run_startup_sequence():
-                    node.get_logger().error(
-                        "Manual home request failed during startup sequence."
-                    )
-                else:
-                    node.get_logger().info(
-                        "Manual home request completed successfully."
-                    )
-
-                continue
-
-            if line == "s":
-                node.get_logger().info(
-                    "Manual calibration sequence request received from terminal input."
-                )
-
-                if not node.execute_calibration_sequence(speed_scale=1.0):
-                    node.get_logger().error(
-                        "Manual calibration sequence request failed."
-                    )
-                else:
-                    node.get_logger().info(
-                        "Manual calibration sequence request completed successfully."
-                    )
-
-                continue
-
-            node.get_logger().info(
-                f"Unknown command '{line}'. Press Enter for home or type 's' to run the sequence."
-            )
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
-
-
-if __name__ == "__main__":
-    main()

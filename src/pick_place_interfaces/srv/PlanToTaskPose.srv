@@ -1,0 +1,7 @@
+pick_place_interfaces/TaskSpacePose pose
+bool use_orientation_constraint
+float64 orientation_tolerance_rad
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory joint_trajectory

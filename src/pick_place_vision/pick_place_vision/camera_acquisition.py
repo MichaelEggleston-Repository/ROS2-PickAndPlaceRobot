@@ -1,7 +1,27 @@
 import rclpy
 from rclpy.node import Node
+from dataclasses import dataclass
+import time
 
 from sensor_msgs.msg import CameraInfo, Image
+from pick_place_interfaces.srv import CaptureSnapshot
+
+@dataclass
+class CameraSnapshot:
+    """
+    Describe one captured set of camera messages.
+
+    Inputs:
+        rgb_image: Latest RGB image message.
+        depth_image: Latest depth image message.
+        camera_info: Latest camera info message.
+
+    Returns:
+        None
+    """
+    rgb_image: Image
+    depth_image: Image | None
+    camera_info: CameraInfo
 
 class CameraAcquisitionNode(Node):
     def __init__(self):
@@ -43,6 +63,12 @@ class CameraAcquisitionNode(Node):
             "/conveyor_camera/camera_info",
             self.camera_info_callback,
             10,
+        )
+
+        self._capture_snapshot_service = self.create_service(
+            CaptureSnapshot,
+            "capture_snapshot",
+            self.capture_snapshot_callback,
         )
 
         # Periodic status logging keeps acquisition checks in one place before
@@ -90,6 +116,84 @@ class CameraAcquisitionNode(Node):
         self._latest_camera_info = msg
         self._last_camera_info_received_time = self.get_clock().now()
 
+    def rgb_stream_ready(self, stale_after_sec: float = 2.0) -> bool:
+        """
+        Check whether the RGB stream is ready for capture.
+
+        Inputs:
+            stale_after_sec: Maximum allowed message age in seconds.
+
+        Returns:
+            bool: True if the RGB stream has a recent message, otherwise False.
+        """
+        return (
+            self._latest_rgb is not None
+            and self.stream_is_fresh(
+                self._last_rgb_received_time,
+                stale_after_sec,
+            )
+        )
+
+    def depth_stream_ready(self, stale_after_sec: float = 2.0) -> bool:
+        """
+        Check whether the depth stream is ready for capture.
+
+        Inputs:
+            stale_after_sec: Maximum allowed message age in seconds.
+
+        Returns:
+            bool: True if the depth stream has a recent message, otherwise False.
+        """
+        return (
+            self._latest_depth is not None
+            and self.stream_is_fresh(
+                self._last_depth_received_time,
+                stale_after_sec,
+            )
+        )
+
+    def camera_info_ready(self, stale_after_sec: float = 2.0) -> bool:
+        """
+        Check whether the camera info stream is ready for capture.
+
+        Inputs:
+            stale_after_sec: Maximum allowed message age in seconds.
+
+        Returns:
+            bool: True if the camera info stream has a recent message, otherwise False.
+        """
+        return (
+            self._latest_camera_info is not None
+            and self.stream_is_fresh(
+                self._last_camera_info_received_time,
+                stale_after_sec,
+            )
+        )
+    
+    def camera_streams_healthy(
+        self,
+        stale_after_sec: float = 2.0,
+        require_depth: bool = True,
+    ) -> bool:
+        """
+        Check whether the required camera streams are currently healthy.
+
+        Inputs:
+            stale_after_sec: Maximum allowed message age in seconds.
+            require_depth: True if the depth stream is required, otherwise False.
+
+        Returns:
+            bool: True if all required streams are fresh, otherwise False.
+        """
+        rgb_ready = self.rgb_stream_ready(stale_after_sec)
+        camera_info_ready = self.camera_info_ready(stale_after_sec)
+
+        if not require_depth:
+            return rgb_ready and camera_info_ready
+
+        depth_ready = self.depth_stream_ready(stale_after_sec)
+        return rgb_ready and depth_ready and camera_info_ready
+
     def stream_is_fresh(
         self,
         last_received_time,
@@ -114,21 +218,29 @@ class CameraAcquisitionNode(Node):
 
         return elapsed_sec <= stale_after_sec
     
-    def camera_streams_healthy(self) -> bool:
+    def camera_streams_healthy(
+        self,
+        stale_after_sec: float = 2.0,
+        require_depth: bool = True,
+    ) -> bool:
         """
-        Check whether all required camera streams are currently healthy.
+        Check whether the required camera streams are currently healthy.
 
         Inputs:
-            None
+            stale_after_sec: Maximum allowed message age in seconds.
+            require_depth: True if the depth stream is required, otherwise False.
 
         Returns:
-            bool: True if RGB, depth, and camera info are all fresh, otherwise False.
+            bool: True if all required streams are fresh, otherwise False.
         """
-        return (
-            self.stream_is_fresh(self._last_rgb_received_time)
-            and self.stream_is_fresh(self._last_depth_received_time)
-            and self.stream_is_fresh(self._last_camera_info_received_time)
-        )
+        rgb_ready = self.rgb_stream_ready(stale_after_sec)
+        camera_info_ready = self.camera_info_ready(stale_after_sec)
+
+        if not require_depth:
+            return rgb_ready and camera_info_ready
+
+        depth_ready = self.depth_stream_ready(stale_after_sec)
+        return rgb_ready and depth_ready and camera_info_ready
 
     def log_camera_status(self) -> None:
         """
@@ -188,6 +300,117 @@ class CameraAcquisitionNode(Node):
                 f"width={self._latest_camera_info.width}, "
                 f"height={self._latest_camera_info.height}"
             )
+
+    def get_latest_snapshot(
+        self,
+        require_depth: bool = True,
+        stale_after_sec: float = 2.0,
+    ) -> CameraSnapshot | None:
+        """
+        Return the latest valid camera snapshot if all required data is available.
+
+        Inputs:
+            require_depth: True if a depth image is required, otherwise False.
+            stale_after_sec: Maximum allowed message age in seconds.
+
+        Returns:
+            CameraSnapshot | None: The latest valid snapshot, otherwise None.
+        """
+        if not self.camera_streams_healthy(
+            stale_after_sec=stale_after_sec,
+            require_depth=require_depth,
+        ):
+            return None
+
+        return CameraSnapshot(
+            rgb_image=self._latest_rgb,
+            depth_image=self._latest_depth if require_depth else None,
+            camera_info=self._latest_camera_info,
+        )
+    
+    def wait_for_fresh_snapshot(
+        self,
+        timeout_sec: float = 5.0,
+        stale_after_sec: float = 2.0,
+        require_depth: bool = True,
+    ) -> CameraSnapshot | None:
+        """
+        Wait until a fresh camera snapshot is available or the timeout expires.
+
+        Inputs:
+            timeout_sec: Maximum time to wait for valid camera data.
+            stale_after_sec: Maximum allowed message age in seconds.
+            require_depth: True if a depth image is required, otherwise False.
+
+        Returns:
+            CameraSnapshot | None: A fresh snapshot if available, otherwise None.
+        """
+        deadline = self.get_clock().now().nanoseconds + int(timeout_sec * 1e9)
+
+        while rclpy.ok():
+            snapshot = self.get_latest_snapshot(
+                require_depth=require_depth,
+                stale_after_sec=stale_after_sec,
+            )
+
+            if snapshot is not None:
+                return snapshot
+
+            if self.get_clock().now().nanoseconds >= deadline:
+                return None
+
+            time.sleep(0.1)
+
+        return None
+    
+    def capture_snapshot_callback(
+        self,
+        request: CaptureSnapshot.Request,
+        response: CaptureSnapshot.Response,
+    ) -> CaptureSnapshot.Response:
+        """
+        Handle a snapshot capture service request.
+
+        Inputs:
+            request: Capture request containing depth and timeout settings.
+            response: Service response to populate with capture results.
+
+        Returns:
+            CaptureSnapshot.Response: The populated snapshot response.
+        """
+        self.get_logger().info(
+            "Received capture snapshot request: "
+            f"require_depth={request.require_depth}, "
+            f"timeout_sec={request.timeout_sec:.2f}"
+        )
+        
+        snapshot = self.wait_for_fresh_snapshot(
+            timeout_sec=request.timeout_sec,
+            stale_after_sec=2.0,
+            require_depth=request.require_depth,
+        )
+
+        if snapshot is None:
+            response.success = False
+            response.message = "Failed to acquire a fresh camera snapshot."
+            self.get_logger().warn(response.message)
+            return response
+
+        response.success = True
+        response.message = "Camera snapshot acquired successfully."
+        response.rgb_image = snapshot.rgb_image
+        response.camera_info = snapshot.camera_info
+
+        if request.require_depth and snapshot.depth_image is not None:
+            response.depth_image = snapshot.depth_image
+
+        self.get_logger().info(
+            "Returning camera snapshot: "
+            f"rgb_frame_id={response.rgb_image.header.frame_id}, "
+            f"camera_info_frame_id={response.camera_info.header.frame_id}"
+        )
+
+        return response
 
 def main(args=None):
     """

@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>pick_place_bringup</name>
+  <version>0.0.0</version>
+  <description>Top-level bringup launch package for the pick and place robot project.</description>
+
+  <maintainer email="M.Eggleston0001@gmail.com">michael</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <exec_depend>pick_place_description</exec_depend>
+  <exec_depend>pick_place_simulation</exec_depend>
+  <exec_depend>pick_place_moveit_config</exec_depend>
+  <exec_depend>pick_place_robot</exec_depend>
+  <exec_depend>pick_place_motion_planning</exec_depend>
+  <exec_depend>pick_place_vision</exec_depend>
+  <exec_depend>pick_place_calibration</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

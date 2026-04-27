@@ -11,6 +11,8 @@
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>pick_place_interfaces</depend>
+  <depend>pick_place_motion_planning</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

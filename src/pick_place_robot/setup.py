@@ -9,16 +9,13 @@ setup(
     version='0.0.0',
     packages=find_packages(exclude=['test']),
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
-        (os.path.join("share", package_name, "launch"), glob("launch/*.launch.py")),
-        (os.path.join("share", package_name, "worlds"), glob("worlds/*.sdf")),
-        (os.path.join("share", package_name, "urdf"), glob("urdf/*")),
-        (os.path.join("share", package_name, "meshes"), glob("meshes/*")),
         (
-            os.path.join("share", package_name, "materials", "textures"),
-            glob("materials/textures/*"),
+            "share/ament_index/resource_index/packages",
+            [f"resource/{package_name}"],
+        ),
+        (
+            f"share/{package_name}",
+            ["package.xml"],
         ),
     ],
     install_requires=['setuptools'],
@@ -35,9 +32,6 @@ setup(
     entry_points={
         'console_scripts': [
             "panda_coordinator = pick_place_robot.panda_coordinator:main",
-            "panda_arm_test = pick_place_robot.panda_arm_control:main",
-            "panda_gripper_test = pick_place_robot.panda_gripper_control:main",
-            "panda_moveit_planner = pick_place_robot.panda_moveit_planner:main",
         ],
     },
 )
