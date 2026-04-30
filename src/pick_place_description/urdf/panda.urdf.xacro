@@ -534,14 +534,16 @@
       <visual>
         <origin xyz="0 0 0" rpy="1.5708 0 0"/>
         <geometry>
-          <mesh filename="package://pick_place_description/meshes/april_tag_plate.dae"/>
+          <mesh
+            filename="package://pick_place_description/meshes/AprilTagBoard.obj"
+            scale="0.001 0.001 0.001"/>
         </geometry>
       </visual>
 
       <collision>
-        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <origin xyz="0 0 0" rpy="1.5708 0 0"/>
         <geometry>
-          <box size="0.08 0.01 0.08"/>
+          <box size="0.25 0.005 0.25"/>
         </geometry>
       </collision>
 

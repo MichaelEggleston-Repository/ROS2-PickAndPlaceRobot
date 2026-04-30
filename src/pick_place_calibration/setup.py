@@ -13,7 +13,11 @@ setup(
         ),
         (
             f"share/{package_name}",
-            ["package.xml"],
+            [
+                "package.xml",
+                "calibration_pose_sequence.json",
+            ],
+            
         ),
     ],
     install_requires=["setuptools"],
@@ -26,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "calibration_eye_to_hand = pick_place_calibration.calibration_eye_to_hand:main",
+            "apriltag_target_detection = pick_place_calibration.apriltag_target_detection:main",
         ],
     },
 )

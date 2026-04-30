@@ -1,9 +1,11 @@
+# src/pick_place_bringup/launch/system_bringup.launch.py
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 from ament_index_python.packages import get_package_share_directory
 import os
@@ -49,6 +51,14 @@ def generate_launch_description():
         executable="panda_moveit_planner",
         name="panda_moveit_planner_node",
         output="screen",
+        parameters=[
+            {
+                "enable_calibration": ParameterValue(
+                    LaunchConfiguration("enable_calibration"),
+                    value_type=bool,
+                )
+            }
+        ],
     )
 
     coordinator_node = Node(

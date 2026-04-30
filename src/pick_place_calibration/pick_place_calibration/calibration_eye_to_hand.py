@@ -86,6 +86,12 @@ class CalibrationHandToEyeNode(Node):
                 "execute_task_pose service was not available. Exiting."
             )
             return False
+        
+        if not self._pose_sweep.wait_for_execute_home_service():
+            self.get_logger().error(
+                "execute_home_position service was not available. Exiting."
+            )
+            return False
 
         if not self._data_collection.wait_for_capture_service():
             self.get_logger().error(
@@ -122,49 +128,72 @@ class CalibrationHandToEyeNode(Node):
 
         successful_captures = 0
         attempted_image_poses = 0
+        sequence_succeeded = False
 
-        for index, step in enumerate(sequence, start=1):
-            step_type = "image" if step.is_image_pose else "intermediate"
+        try:
+            for index, step in enumerate(sequence, start=1):
+                step_type = "image" if step.is_image_pose else "intermediate"
+
+                self.get_logger().info(
+                    f"Executing calibration step {index}/{len(sequence)}: "
+                    f"{step.name} ({step_type})"
+                )
+
+                motion_succeeded = self._pose_sweep.move_to_sequence_step(
+                    step,
+                    speed_scale=1.0,
+                )
+
+                if not motion_succeeded:
+                    self.get_logger().error(
+                        f"Calibration motion failed at step '{step.name}'."
+                    )
+                    return False
+
+                if not step.is_image_pose:
+                    continue
+
+                attempted_image_poses += 1
+
+                result = self._data_collection.capture_at_pose(
+                    step.name,
+                    step.pose,
+                )
+
+                if result.image_capture_success:
+                    self._data_collection.save_capture_result(result)
+                    successful_captures += 1
+                else:
+                    self.get_logger().warn(
+                        f"Image capture failed at calibration image pose '{step.name}'."
+                    )
 
             self.get_logger().info(
-                f"Executing calibration step {index}/{len(sequence)}: "
-                f"{step.name} ({step_type})"
+                "Hand-to-eye calibration sequence complete: "
+                f"{successful_captures}/{attempted_image_poses} image captures succeeded."
+            )
+            sequence_succeeded = True
+            return True
+
+        finally:
+            self.get_logger().info(
+                "Calibration sequence finished. Requesting planned move to home."
             )
 
-            motion_succeeded = self._pose_sweep.move_to_sequence_step(
-                step,
-                speed_scale=0.25,
-            )
+            home_succeeded = self._pose_sweep.move_home()
 
-            if not motion_succeeded:
+            if not home_succeeded:
                 self.get_logger().error(
-                    f"Calibration motion failed at step '{step.name}'."
+                    "Robot failed to return home at the end of the calibration sequence."
                 )
-                return False
-
-            if not step.is_image_pose:
-                continue
-
-            attempted_image_poses += 1
-
-            result = self._data_collection.capture_at_pose(
-                step.name,
-                step.pose,
-            )
-
-            if result.image_capture_success:
-                self._data_collection.save_capture_result(result)
-                successful_captures += 1
+            elif sequence_succeeded:
+                self.get_logger().info(
+                    "Robot returned home after successful calibration sequence."
+                )
             else:
-                self.get_logger().warn(
-                    f"Image capture failed at calibration image pose '{step.name}'."
+                self.get_logger().info(
+                    "Robot returned home after calibration sequence ended early."
                 )
-
-        self.get_logger().info(
-            "Hand-to-eye calibration sequence complete: "
-            f"{successful_captures}/{attempted_image_poses} image captures succeeded."
-        )
-        return True
 
 
 def main(args=None) -> None:

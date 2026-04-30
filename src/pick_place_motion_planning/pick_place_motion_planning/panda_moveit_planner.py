@@ -1,14 +1,15 @@
-import rclpy
-from rclpy.node import Node
 import math
 from dataclasses import dataclass
 
-from moveit.planning import MoveItPy
-from moveit_msgs.msg import Constraints, OrientationConstraint
+import rclpy
 from geometry_msgs.msg import Pose, PoseStamped
-from trajectory_msgs.msg import JointTrajectory
-from pick_place_interfaces.srv import PlanToTaskPose
+from moveit.planning import MoveItPy
+from moveit.core.robot_state import RobotState
+from moveit_msgs.msg import Constraints, OrientationConstraint
 from pick_place_interfaces.msg import TaskSpacePose as TaskSpacePoseMsg
+from pick_place_interfaces.srv import PlanToTaskPose, PlanToJointPositions
+from rclpy.node import Node
+from trajectory_msgs.msg import JointTrajectory
 
 from pick_place_motion_planning.moveit_config_loader import build_moveit_config_dict
 from pick_place_motion_planning.panda_scene_planning import PandaPlanningScene
@@ -35,6 +36,7 @@ PANDA_JOINT_LIMITS = {
     "panda_joint7": (-2.8973, 2.8973),
 }
 
+
 @dataclass
 class PlanningResult:
     """
@@ -52,6 +54,7 @@ class PlanningResult:
     joint_trajectory: JointTrajectory | None
     message: str
 
+
 class PandaMoveItPlanner:
     def __init__(self, node: Node):
         """
@@ -63,11 +66,19 @@ class PandaMoveItPlanner:
         Returns:
             None
         """
-
         self._node = node
 
-        self._node.get_logger().info("Loading MoveIt configuration.")
-        moveit_config = build_moveit_config_dict()
+        self._node.declare_parameter("enable_calibration", False)
+        enable_calibration = bool(
+            self._node.get_parameter("enable_calibration").value
+        )
+
+        self._node.get_logger().info(
+            f"Loading MoveIt configuration with enable_calibration={enable_calibration}."
+        )
+        moveit_config = build_moveit_config_dict(
+            enable_calibration=enable_calibration,
+        )
 
         self._node.get_logger().info("About to initialize MoveItPy.")
         self._moveit = MoveItPy(
@@ -76,7 +87,6 @@ class PandaMoveItPlanner:
         )
         self._node.get_logger().info("MoveItPy initialized successfully.")
 
-        # The planner owns planning components, not config assembly details.
         self._arm = self._moveit.get_planning_component(ARM_GROUP_NAME)
         self._node.get_logger().info("Planning component for Panda arm is ready.")
         self._scene = PandaPlanningScene(self._node)
@@ -85,6 +95,12 @@ class PandaMoveItPlanner:
             PlanToTaskPose,
             "plan_to_task_pose",
             self.plan_to_task_pose_callback,
+        )
+
+        self._plan_to_joint_positions_service = self._node.create_service(
+            PlanToJointPositions,
+            "plan_to_joint_positions",
+            self.plan_to_joint_positions_callback,
         )
 
     def plan_to_task_pose_callback(
@@ -104,15 +120,22 @@ class PandaMoveItPlanner:
             PlanToTaskPose.Response: The populated planning response.
         """
         self._node.get_logger().info(
-            "Received plan_to_task_pose request: "
-            f"use_orientation_constraint={request.use_orientation_constraint}, "
-            f"orientation_tolerance_rad={request.orientation_tolerance_rad:.3f}"
+            "Received plan_to_task_pose request."
         )
 
-        if request.use_orientation_constraint:
+        orientation_constraint_enabled = False
+        orientation_tolerance_rad = 1.0
+
+        if hasattr(request, "constrain_orientation"):
+            orientation_constraint_enabled = request.constrain_orientation
+
+        if hasattr(request, "orientation_tolerance_rad"):
+            orientation_tolerance_rad = request.orientation_tolerance_rad
+
+        if orientation_constraint_enabled:
             result = self.plan_to_task_pose_with_orientation_constraint(
                 request.pose,
-                orientation_tolerance_rad=request.orientation_tolerance_rad,
+                orientation_tolerance_rad=orientation_tolerance_rad,
             )
         else:
             result = self.plan_to_task_pose(request.pose)
@@ -123,55 +146,52 @@ class PandaMoveItPlanner:
         if result.joint_trajectory is not None:
             response.joint_trajectory = result.joint_trajectory
 
-        self._node.get_logger().info(
-            "plan_to_task_pose response: "
-            f"success={response.success}, "
-            f"message='{response.message}'"
+        return response
+    
+    def plan_to_joint_positions_callback(
+        self,
+        request: PlanToJointPositions.Request,
+        response: PlanToJointPositions.Response,
+    ) -> PlanToJointPositions.Response:
+        """
+        Handle a planning request for a joint-space target.
+
+        Inputs:
+            request: Planning request containing joint names and target positions.
+            response: Service response to populate with the planning result.
+
+        Returns:
+            PlanToJointPositions.Response: The populated planning response.
+        """
+        self._node.get_logger().info("Received plan_to_joint_positions request.")
+
+        result = self.plan_to_joint_positions(
+            joint_names=list(request.joint_names),
+            joint_positions=list(request.joint_positions),
         )
+
+        response.success = result.success
+        response.message = result.message
+
+        if result.joint_trajectory is not None:
+            response.joint_trajectory = result.joint_trajectory
 
         return response
 
-    def log_requested_pose(self, pose) -> None:
+    def log_requested_pose(self, pose: TaskSpacePoseMsg) -> None:
         """
-        Log the requested task-space pose before planning.
+        Log the incoming task-space pose request.
 
         Inputs:
-            pose: The target end-effector pose in task space.
+            pose: Requested task-space pose.
 
         Returns:
             None
         """
         self._node.get_logger().info(
-            "Planning request received for task pose: "
+            "Requested task pose: "
             f"x={pose.x:.3f}, y={pose.y:.3f}, z={pose.z:.3f}, "
             f"roll={pose.roll:.3f}, pitch={pose.pitch:.3f}, yaw={pose.yaw:.3f}"
-        )
-
-    def log_current_tcp_pose(self) -> None:
-        """
-        Log the current TCP pose for debugging.
-
-        Inputs:
-            None
-
-        Returns:
-            None
-        """
-        tcp_pose = self.get_current_tcp_pose()
-
-        if tcp_pose is None:
-            self._node.get_logger().error("Current TCP pose is unavailable.")
-            return
-
-        self._node.get_logger().info(
-            "Current TCP pose: "
-            f"x={float(tcp_pose.position.x):.6f}, "
-            f"y={float(tcp_pose.position.y):.6f}, "
-            f"z={float(tcp_pose.position.z):.6f}, "
-            f"qx={float(tcp_pose.orientation.x):.6f}, "
-            f"qy={float(tcp_pose.orientation.y):.6f}, "
-            f"qz={float(tcp_pose.orientation.z):.6f}, "
-            f"qw={float(tcp_pose.orientation.w):.6f}"
         )
 
     def rpy_to_quaternion(
@@ -181,65 +201,59 @@ class PandaMoveItPlanner:
         yaw: float,
     ) -> tuple[float, float, float, float]:
         """
-        Convert roll, pitch, yaw Euler angles into a quaternion.
+        Convert roll, pitch, yaw to quaternion.
 
         Inputs:
-            roll: Rotation about the x-axis in radians.
-            pitch: Rotation about the y-axis in radians.
-            yaw: Rotation about the z-axis in radians.
+            roll: Rotation about X axis in radians.
+            pitch: Rotation about Y axis in radians.
+            yaw: Rotation about Z axis in radians.
 
         Returns:
-            tuple[float, float, float, float]:
-                Quaternion as (x, y, z, w).
+            tuple[float, float, float, float]: Quaternion (x, y, z, w).
         """
-        half_roll = roll * 0.5
-        half_pitch = pitch * 0.5
-        half_yaw = yaw * 0.5
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
 
-        cr = math.cos(half_roll)
-        sr = math.sin(half_roll)
-        cp = math.cos(half_pitch)
-        sp = math.sin(half_pitch)
-        cy = math.cos(half_yaw)
-        sy = math.sin(half_yaw)
-
+        qw = cr * cp * cy + sr * sp * sy
         qx = sr * cp * cy - cr * sp * sy
         qy = cr * sp * cy + sr * cp * sy
         qz = cr * cp * sy - sr * sp * cy
-        qw = cr * cp * cy + sr * sp * sy
 
-        return (qx, qy, qz, qw)
-    
-    def create_pose_target(self, pose) -> PoseStamped:
+        return qx, qy, qz, qw
+
+    def create_pose_target(self, pose: TaskSpacePoseMsg) -> PoseStamped:
         """
-        Create a PoseStamped target from a task-space pose.
+        Build a PoseStamped target for MoveIt.
 
         Inputs:
-            pose: The target end-effector pose in task space.
+            pose: Requested task-space pose.
 
         Returns:
-            PoseStamped: The target pose formatted for MoveIt planning.
+            PoseStamped: Target pose in panda_link0.
         """
+        target_pose = PoseStamped()
+        target_pose.header.frame_id = "panda_link0"
+
+        target_pose.pose.position.x = pose.x
+        target_pose.pose.position.y = pose.y
+        target_pose.pose.position.z = pose.z
+
         qx, qy, qz, qw = self.rpy_to_quaternion(
             pose.roll,
             pose.pitch,
             pose.yaw,
         )
+        target_pose.pose.orientation.x = qx
+        target_pose.pose.orientation.y = qy
+        target_pose.pose.orientation.z = qz
+        target_pose.pose.orientation.w = qw
 
-        target = PoseStamped()
-        target.header.frame_id = "panda_link0"
+        return target_pose
 
-        target.pose.position.x = pose.x
-        target.pose.position.y = pose.y
-        target.pose.position.z = pose.z
-
-        target.pose.orientation.x = qx
-        target.pose.orientation.y = qy
-        target.pose.orientation.z = qz
-        target.pose.orientation.w = qw
-
-        return target
-    
     def create_orientation_path_constraint(
         self,
         qx: float,
@@ -249,38 +263,34 @@ class PandaMoveItPlanner:
         tolerance_rad: float,
     ) -> Constraints:
         """
-        Create a path constraint that keeps the Panda TCP orientation close to
-        the requested quaternion throughout the motion.
+        Create a MoveIt orientation path constraint for panda_hand_tcp.
 
         Inputs:
-            qx: Quaternion x component.
-            qy: Quaternion y component.
-            qz: Quaternion z component.
-            qw: Quaternion w component.
-            tolerance_rad: Absolute orientation tolerance in radians for each axis.
+            qx: Quaternion x.
+            qy: Quaternion y.
+            qz: Quaternion z.
+            qw: Quaternion w.
+            tolerance_rad: Allowed absolute axis tolerance in radians.
 
         Returns:
-            Constraints: A MoveIt path-constraint message for the Panda TCP.
+            Constraints: Orientation path constraint container.
         """
         constraint = OrientationConstraint()
         constraint.header.frame_id = "panda_link0"
         constraint.link_name = "panda_hand_tcp"
-
-        constraint.orientation.x = float(qx)
-        constraint.orientation.y = float(qy)
-        constraint.orientation.z = float(qz)
-        constraint.orientation.w = float(qw)
-
-        constraint.absolute_x_axis_tolerance = float(tolerance_rad)
-        constraint.absolute_y_axis_tolerance = float(tolerance_rad)
-        constraint.absolute_z_axis_tolerance = float(tolerance_rad)
-        constraint.weight = float(1.0)
+        constraint.orientation.x = qx
+        constraint.orientation.y = qy
+        constraint.orientation.z = qz
+        constraint.orientation.w = qw
+        constraint.absolute_x_axis_tolerance = tolerance_rad
+        constraint.absolute_y_axis_tolerance = tolerance_rad
+        constraint.absolute_z_axis_tolerance = tolerance_rad
+        constraint.weight = 1.0
 
         path_constraints = Constraints()
         path_constraints.orientation_constraints.append(constraint)
-
         return path_constraints
-    
+
     def trajectory_respects_joint_margin(
         self,
         joint_trajectory: JointTrajectory,
@@ -292,12 +302,12 @@ class PandaMoveItPlanner:
 
         Inputs:
             joint_trajectory: Planned arm trajectory returned by MoveIt.
-            margin_rad: Minimum distance each waypoint must keep from the hard joint limits.
+            margin_rad: Minimum distance each waypoint must keep from hard joint limits.
 
         Returns:
             tuple[bool, str]:
-                True and a success message if the full trajectory is safe,
-                otherwise False and the reason for rejection.
+                True and a success message if all waypoints are safe, otherwise
+                False and the reason for rejection.
         """
         if not joint_trajectory.joint_names:
             return False, "Trajectory contains no joint names."
@@ -320,98 +330,35 @@ class PandaMoveItPlanner:
                 if joint_position <= lower_limit + margin_rad:
                     return (
                         False,
-                        f"Waypoint {point_index} rejected because {joint_name}="
-                        f"{joint_position:.4f} is within {margin_rad:.3f} rad "
-                        f"of lower limit {lower_limit:.4f}.",
+                        f"Waypoint {point_index} rejected because {joint_name}={joint_position:.4f} "
+                        f"is within {margin_rad:.3f} rad of lower limit {lower_limit:.4f}.",
                     )
 
                 if joint_position >= upper_limit - margin_rad:
                     return (
                         False,
-                        f"Waypoint {point_index} rejected because {joint_name}="
-                        f"{joint_position:.4f} is within {margin_rad:.3f} rad "
-                        f"of upper limit {upper_limit:.4f}.",
+                        f"Waypoint {point_index} rejected because {joint_name}={joint_position:.4f} "
+                        f"is within {margin_rad:.3f} rad of upper limit {upper_limit:.4f}.",
                     )
 
-        return True, "Trajectory stayed within joint safety margins."
+        return True, "All waypoints stayed within joint safety margins."
 
-    def final_waypoint_respects_branch_continuity(
-        self,
-        joint_trajectory: JointTrajectory,
-        max_total_jump_rad: float = 4.0,
-        max_single_joint_jump_rad: float = 1.8,
-    ) -> tuple[bool, str]:
-        """
-        Check whether the final waypoint stays reasonably close to the current arm
-        joint state, to reduce branch-flip solutions.
-
-        Inputs:
-            joint_trajectory: Planned arm trajectory returned by MoveIt.
-            max_total_jump_rad: Maximum allowed sum of absolute joint deltas.
-            max_single_joint_jump_rad: Maximum allowed absolute delta for any one joint.
-
-        Returns:
-            tuple[bool, str]:
-                True and a success message if the final waypoint looks continuous,
-                otherwise False and the reason for rejection.
-        """
-        current_joint_positions = self.get_current_arm_joint_positions()
-
-        if current_joint_positions is None:
-            return True, "Current joint state unavailable, skipping continuity check."
-
-        if not joint_trajectory.points:
-            return False, "Trajectory contains no points."
-
-        final_point = joint_trajectory.points[-1]
-        total_jump = 0.0
-
-        for joint_name, final_position in zip(
-            joint_trajectory.joint_names,
-            final_point.positions,
-        ):
-            if joint_name not in current_joint_positions:
-                continue
-
-            delta = abs(float(final_position) - current_joint_positions[joint_name])
-            total_jump += delta
-
-            if delta > max_single_joint_jump_rad:
-                return (
-                    False,
-                    f"Final waypoint rejected because {joint_name} jumps by "
-                    f"{delta:.3f} rad, exceeding the limit of "
-                    f"{max_single_joint_jump_rad:.3f} rad.",
-                )
-
-        if total_jump > max_total_jump_rad:
-            return (
-                False,
-                f"Final waypoint rejected because total joint jump is "
-                f"{total_jump:.3f} rad, exceeding the limit of "
-                f"{max_total_jump_rad:.3f} rad.",
-            )
-
-        return True, "Final waypoint respected branch continuity limits."
-    
     def get_current_tcp_pose(self) -> Pose | None:
         """
-        Get the current pose of the Panda TCP from the available MoveItPy state interfaces.
+        Read the current TCP pose from MoveIt.
 
         Inputs:
             None
 
         Returns:
-            Pose | None:
-                The current TCP pose if available, otherwise None.
+            Pose | None: Current panda_hand_tcp pose if available.
         """
         tcp_link_name = "panda_hand_tcp"
 
         if hasattr(self._moveit, "get_planning_scene_monitor"):
-            planning_scene_monitor = self._moveit.get_planning_scene_monitor()
-
-            if planning_scene_monitor is not None:
-                try:
+            try:
+                planning_scene_monitor = self._moveit.get_planning_scene_monitor()
+                if planning_scene_monitor is not None:
                     with planning_scene_monitor.read_only() as scene:
                         current_state = scene.current_state
                         tcp_pose = current_state.get_pose(tcp_link_name)
@@ -426,10 +373,10 @@ class PandaMoveItPlanner:
                             pose.orientation.z = tcp_pose.orientation.z
                             pose.orientation.w = tcp_pose.orientation.w
                             return pose
-                except Exception as exc:
-                    self._node.get_logger().warn(
-                        f"Failed to read TCP pose from planning scene monitor: {exc}"
-                    )
+            except Exception as exc:
+                self._node.get_logger().warn(
+                    f"Failed to read TCP pose from planning scene monitor: {exc}"
+                )
 
         if hasattr(self._moveit, "get_planning_scene"):
             try:
@@ -504,7 +451,7 @@ class PandaMoveItPlanner:
                 f"Failed to read current Panda arm joint positions: {exc}"
             )
             return None
-    
+
     def plan_to_task_pose(self, pose) -> PlanningResult:
         """
         Plan an arm motion to a task-space pose.
@@ -533,6 +480,74 @@ class PandaMoveItPlanner:
             pose_stamped_msg=target_pose,
             pose_link="panda_hand_tcp",
         )
+
+        return self.plan_safe_trajectory_with_retries(
+            max_attempts=30,
+            margin_rad=0.10,
+        )
+    
+    def plan_to_joint_positions(
+        self,
+        joint_names: list[str],
+        joint_positions: list[float],
+    ) -> PlanningResult:
+        """
+        Plan an arm motion to a requested joint-space target.
+
+        Inputs:
+            joint_names: Ordered list of joint names for the target.
+            joint_positions: Ordered list of target joint positions in radians.
+
+        Returns:
+            PlanningResult: The outcome of the planning request.
+        """
+        if not joint_names:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message="Joint-space planning request contained no joint names.",
+            )
+        
+        if joint_names != PANDA_ARM_JOINT_NAMES:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message=(
+                    "Joint-space planning request used an unexpected joint order. "
+                    f"Expected {PANDA_ARM_JOINT_NAMES}, got {joint_names}."
+                ),
+            )
+
+        if len(joint_names) != len(joint_positions):
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message=(
+                    "Joint-space planning request had mismatched joint_names and "
+                    "joint_positions lengths."
+                ),
+            )
+
+        self._node.get_logger().info(
+            "Requested joint target: "
+            + ", ".join(
+                f"{name}={position:.4f}"
+                for name, position in zip(joint_names, joint_positions)
+            )
+        )
+
+        self._arm.set_start_state_to_current_state()
+
+        robot_model = self._moveit.get_robot_model()
+        goal_state = RobotState(robot_model)
+
+        goal_state.set_joint_group_positions(
+            ARM_GROUP_NAME,
+            [float(position) for position in joint_positions],
+        )
+        goal_state.update()
+
+        self._arm.set_goal_state(robot_state=goal_state)
 
         return self.plan_safe_trajectory_with_retries(
             max_attempts=30,
@@ -668,7 +683,7 @@ class PandaMoveItPlanner:
             joint_trajectory=None,
             message=last_message,
         )
-        
+
     def plan_to_task_pose_with_orientation_constraint(
         self,
         pose: TaskSpacePoseMsg,
@@ -778,7 +793,7 @@ class PandaMoveItPlanner:
                 "passed safety screening."
             ),
         )
-    
+
     def run_planning_smoke_test(self) -> None:
         """
         Run a simple manual planning smoke test using one task-space target.
@@ -808,7 +823,8 @@ class PandaMoveItPlanner:
             f"{result.joint_trajectory is not None}"
         )
         self._node.get_logger().info(f"Returned joint positions: {result.joint_trajectory}")
-        
+
+
 def main(args=None):
     """
     Start the Panda MoveIt planner server node and spin until shutdown.
@@ -829,6 +845,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()

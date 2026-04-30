@@ -10,7 +10,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 # Home pose values are kept as constants so they are easy to tune later.
 HOME_JOINT_POSITIONS = [-1.5708, -0.4, 0.0, -2.0, 0.0, 1.6, 0.8]
-HOME_MOVE_DURATION_SEC = 5
+HOME_MOVE_DURATION_SEC = 2
 
 # Keep the joint ordering in one place so every goal uses the same mapping.
 ARM_JOINT_NAMES = [
@@ -387,9 +387,9 @@ class PandaArmControl:
 
         return self.wait_for_result(goal_handle)
 
-    def move_home(self) -> bool:
+    def move_home_unplanned(self) -> bool:
         """
-        Move the Panda arm to the predefined home pose.
+        Move the Panda arm directly to the predefined home joint configuration.
 
         Inputs:
             None

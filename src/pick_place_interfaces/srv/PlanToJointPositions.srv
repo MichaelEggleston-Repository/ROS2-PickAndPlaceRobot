@@ -1,0 +1,6 @@
+string[] joint_names
+float64[] joint_positions
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory joint_trajectory

@@ -1,5 +1,8 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+
 from dataclasses import dataclass
 import time
 
@@ -44,11 +47,20 @@ class CameraAcquisitionNode(Node):
         self._last_depth_received_time = None
         self._last_camera_info_received_time = None
 
+        self._last_camera_status_log_time_sec = 0.0
+        self._last_camera_status_summary = None
+        self._camera_status_log_period_sec = 10.0
+
+        self._subscription_callback_group = ReentrantCallbackGroup()
+        self._service_callback_group = ReentrantCallbackGroup()
+        self._timer_callback_group = ReentrantCallbackGroup()
+
         self._rgb_subscription = self.create_subscription(
             Image,
             "/conveyor_camera/image",
             self.rgb_callback,
             10,
+            callback_group=self._subscription_callback_group,
         )
 
         self._depth_subscription = self.create_subscription(
@@ -56,6 +68,7 @@ class CameraAcquisitionNode(Node):
             "/conveyor_camera/depth_image",
             self.depth_callback,
             10,
+            callback_group=self._subscription_callback_group,
         )
 
         self._camera_info_subscription = self.create_subscription(
@@ -63,17 +76,23 @@ class CameraAcquisitionNode(Node):
             "/conveyor_camera/camera_info",
             self.camera_info_callback,
             10,
+            callback_group=self._subscription_callback_group,
         )
 
         self._capture_snapshot_service = self.create_service(
             CaptureSnapshot,
             "capture_snapshot",
             self.capture_snapshot_callback,
+            callback_group=self._service_callback_group,
         )
 
         # Periodic status logging keeps acquisition checks in one place before
         # calibration logic is added.
-        self._status_timer = self.create_timer(2.0, self.log_camera_status)
+        self._status_timer = self.create_timer(
+            2.0,
+            self.log_camera_status,
+            callback_group=self._timer_callback_group,
+        )
 
         self.get_logger().info("Camera acquisition node started.")
 
@@ -217,30 +236,6 @@ class CameraAcquisitionNode(Node):
         ).nanoseconds / 1e9
 
         return elapsed_sec <= stale_after_sec
-    
-    def camera_streams_healthy(
-        self,
-        stale_after_sec: float = 2.0,
-        require_depth: bool = True,
-    ) -> bool:
-        """
-        Check whether the required camera streams are currently healthy.
-
-        Inputs:
-            stale_after_sec: Maximum allowed message age in seconds.
-            require_depth: True if the depth stream is required, otherwise False.
-
-        Returns:
-            bool: True if all required streams are fresh, otherwise False.
-        """
-        rgb_ready = self.rgb_stream_ready(stale_after_sec)
-        camera_info_ready = self.camera_info_ready(stale_after_sec)
-
-        if not require_depth:
-            return rgb_ready and camera_info_ready
-
-        depth_ready = self.depth_stream_ready(stale_after_sec)
-        return rgb_ready and depth_ready and camera_info_ready
 
     def log_camera_status(self) -> None:
         """
@@ -264,8 +259,7 @@ class CameraAcquisitionNode(Node):
 
         streams_healthy = self.camera_streams_healthy()
 
-        self.get_logger().info(
-            "Camera status: "
+        status_summary = (
             f"streams_healthy={streams_healthy}, "
             f"rgb_ready={rgb_ready}, "
             f"rgb_fresh={rgb_fresh}, "
@@ -274,6 +268,19 @@ class CameraAcquisitionNode(Node):
             f"camera_info_ready={camera_info_ready}, "
             f"camera_info_fresh={camera_info_fresh}"
         )
+
+        now_sec = time.time()
+        status_changed = status_summary != self._last_camera_status_summary
+        period_elapsed = (
+            now_sec - self._last_camera_status_log_time_sec
+        ) >= self._camera_status_log_period_sec
+
+        if not status_changed and not period_elapsed:
+            return
+
+        self.get_logger().info(f"Camera status: {status_summary}")
+        self._last_camera_status_log_time_sec = now_sec
+        self._last_camera_status_summary = status_summary
 
         if self._latest_rgb is not None:
             self.get_logger().info(
@@ -424,10 +431,13 @@ def main(args=None):
     """
     rclpy.init(args=args)
     node = CameraAcquisitionNode()
+    executor = MultiThreadedExecutor(num_threads=4)
 
     try:
-        rclpy.spin(node)
+        executor.add_node(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 

@@ -58,7 +58,7 @@ class CalibrationDataCollection:
         self._node = node
 
         self._settle_time_sec = 2.0
-        self._capture_timeout_sec = 10.0
+        self._capture_timeout_sec = 30.0
 
         self._capture_snapshot_client = self._node.create_client(
             CaptureSnapshot,
@@ -231,6 +231,26 @@ class CalibrationDataCollection:
         )
         return None
     
+    def compute_position_error_m(self, requested_tcp_pose, base_to_tool_transform) -> float | None:
+        """
+        Compute Euclidean position error between requested TCP pose and measured TF pose.
+
+        Inputs:
+            requested_tcp_pose: Requested task-space pose.
+            base_to_tool_transform: Measured base-to-tool transform.
+
+        Returns:
+            float | None: Position error in meters if both inputs are available.
+        """
+        if requested_tcp_pose is None or base_to_tool_transform is None:
+            return None
+
+        dx = float(base_to_tool_transform.transform.translation.x) - float(requested_tcp_pose.x)
+        dy = float(base_to_tool_transform.transform.translation.y) - float(requested_tcp_pose.y)
+        dz = float(base_to_tool_transform.transform.translation.z) - float(requested_tcp_pose.z)
+
+        return float((dx * dx + dy * dy + dz * dz) ** 0.5)
+    
     def capture_at_pose(self, pose_name: str, requested_tcp_pose) -> CalibrationCaptureResult:
         """
         Capture a camera snapshot after the robot reaches a calibration pose.
@@ -243,6 +263,42 @@ class CalibrationDataCollection:
             CalibrationCaptureResult: Summary of the capture attempt.
         """
         self.wait_for_robot_settle()
+
+        base_to_tool_transform = None
+
+        response = self.request_camera_snapshot(require_depth=False)
+
+        if response is None:
+            self._node.get_logger().warn(
+                f"Image capture service call failed at pose '{pose_name}'."
+            )
+            return CalibrationCaptureResult(
+                pose_name=pose_name,
+                motion_success=True,
+                image_capture_success=False,
+                image_frame_id=None,
+                snapshot_response=None,
+                requested_tcp_pose=requested_tcp_pose,
+                robot_base_frame=self._robot_base_frame,
+                robot_tool_frame=self._robot_tool_frame,
+                base_to_tool_transform=None,
+            )
+
+        if not response.success:
+            self._node.get_logger().warn(
+                f"Image capture failed at pose '{pose_name}': {response.message}"
+            )
+            return CalibrationCaptureResult(
+                pose_name=pose_name,
+                motion_success=True,
+                image_capture_success=False,
+                image_frame_id=None,
+                snapshot_response=None,
+                requested_tcp_pose=requested_tcp_pose,
+                robot_base_frame=self._robot_base_frame,
+                robot_tool_frame=self._robot_tool_frame,
+                base_to_tool_transform=None,
+            )
 
         base_to_tool_transform = self.lookup_current_tool_transform()
 
@@ -262,39 +318,32 @@ class CalibrationDataCollection:
                 base_to_tool_transform=None,
             )
 
-        response = self.request_camera_snapshot(require_depth=False)
+        position_error_m = self.compute_position_error_m(
+            requested_tcp_pose,
+            base_to_tool_transform,
+        )
 
-        if response is None:
-            self._node.get_logger().warn(
-                f"Image capture service call failed at pose '{pose_name}'."
-            )
-            return CalibrationCaptureResult(
-                pose_name=pose_name,
-                motion_success=True,
-                image_capture_success=False,
-                image_frame_id=None,
-                snapshot_response=None,
-                requested_tcp_pose=requested_tcp_pose,
-                robot_base_frame=self._robot_base_frame,
-                robot_tool_frame=self._robot_tool_frame,
-                base_to_tool_transform=base_to_tool_transform,
+        if position_error_m is not None:
+            self._node.get_logger().info(
+                f"Pose validation for '{pose_name}': position_error_m={position_error_m:.4f}"
             )
 
-        if not response.success:
-            self._node.get_logger().warn(
-                f"Image capture failed at pose '{pose_name}': {response.message}"
-            )
-            return CalibrationCaptureResult(
-                pose_name=pose_name,
-                motion_success=True,
-                image_capture_success=False,
-                image_frame_id=None,
-                snapshot_response=None,
-                requested_tcp_pose=requested_tcp_pose,
-                robot_base_frame=self._robot_base_frame,
-                robot_tool_frame=self._robot_tool_frame,
-                base_to_tool_transform=base_to_tool_transform,
-            )
+            if position_error_m > 0.02:
+                self._node.get_logger().warn(
+                    f"Rejecting capture at pose '{pose_name}' because requested vs actual "
+                    f"TCP position error was too large: {position_error_m:.4f} m"
+                )
+                return CalibrationCaptureResult(
+                    pose_name=pose_name,
+                    motion_success=True,
+                    image_capture_success=False,
+                    image_frame_id=None,
+                    snapshot_response=None,
+                    requested_tcp_pose=requested_tcp_pose,
+                    robot_base_frame=self._robot_base_frame,
+                    robot_tool_frame=self._robot_tool_frame,
+                    base_to_tool_transform=base_to_tool_transform,
+                )
 
         self._node.get_logger().info(
             f"Image captured at pose '{pose_name}' "

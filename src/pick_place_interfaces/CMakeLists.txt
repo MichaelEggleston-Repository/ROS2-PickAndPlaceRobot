@@ -11,6 +11,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/CaptureSnapshot.srv"
   "srv/PlanToTaskPose.srv"
   "srv/ExecuteTaskPose.srv"
+  "srv/PlanToJointPositions.srv"
+  "srv/ExecuteHome.srv"
   DEPENDENCIES
     sensor_msgs
     trajectory_msgs

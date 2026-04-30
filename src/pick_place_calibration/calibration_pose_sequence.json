@@ -1,0 +1,368 @@
+{
+  "steps": [
+    {
+      "name": "intermediate_01",
+      "type": "intermediate",
+      "translation": [
+        0.427,
+        0.003,
+        0.517
+      ],
+      "rpy_radians": [
+        3.142,
+        0.0,
+        -0.008
+      ]
+    },
+    {
+      "name": "intermediate_02",
+      "type": "intermediate",
+      "translation": [
+        0.439,
+        0.074,
+        0.92
+      ],
+      "rpy_radians": [
+        -0.349,
+        0.062,
+        0.01
+      ]
+    },
+    {
+      "name": "image_01",
+      "type": "image",
+      "translation": [
+        0.524,
+        0.075,
+        0.844
+      ],
+      "rpy_radians": [
+        -0.349,
+        0.218,
+        0.011
+      ]
+    },
+    {
+      "name": "image_02",
+      "type": "image",
+      "translation": [
+        0.525,
+        -0.071,
+        0.844
+      ],
+      "rpy_radians": [
+        -0.348,
+        0.218,
+        -0.265
+      ]
+    },
+    {
+      "name": "image_03",
+      "type": "image",
+      "translation": [
+        0.525,
+        -0.071,
+        0.844
+      ],
+      "rpy_radians": [
+        -0.113,
+        0.393,
+        0.481
+      ]
+    },
+    {
+      "name": "intermediate_03",
+      "type": "intermediate",
+      "translation": [
+        0.494,
+        -0.192,
+        0.844
+      ],
+      "rpy_radians": [
+        -0.113,
+        0.394,
+        0.245
+      ]
+    },
+    {
+      "name": "image_04",
+      "type": "image",
+      "translation": [
+        0.494,
+        -0.192,
+        0.844
+      ],
+      "rpy_radians": [
+        -0.186,
+        0.366,
+        0.049
+      ]
+    },
+    {
+      "name": "image_05",
+      "type": "image",
+      "translation": [
+        0.59,
+        -0.167,
+        0.915
+      ],
+      "rpy_radians": [
+        -0.27,
+        0.186,
+        0.159
+      ]
+    },
+    {
+      "name": "image_06",
+      "type": "image",
+      "translation": [
+        0.632,
+        -0.191,
+        0.86
+      ],
+      "rpy_radians": [
+        -0.322,
+        0.079,
+        -0.458
+      ]
+    },
+    {
+      "name": "intermediate_04",
+      "type": "intermediate",
+      "translation": [
+        0.649,
+        -0.219,
+        0.904
+      ],
+      "rpy_radians": [
+        -0.351,
+        0.274,
+        -0.592
+      ]
+    },
+    {
+      "name": "image_07",
+      "type": "image",
+      "translation": [
+        0.684,
+        -0.033,
+        0.904
+      ],
+      "rpy_radians": [
+        -0.159,
+        0.413,
+        0.238
+      ]
+    },
+    {
+      "name": "image_08",
+      "type": "image",
+      "translation": [
+        0.576,
+        -0.002,
+        0.954
+      ],
+      "rpy_radians": [
+        -0.289,
+        -0.259,
+        -0.196
+      ]
+    },
+    {
+      "name": "image_09",
+      "type": "image",
+      "translation": [
+        0.562,
+        -0.152,
+        0.949
+      ],
+      "rpy_radians": [
+        0.416,
+        -0.163,
+        -0.272
+      ]
+    },
+    {
+      "name": "image_10",
+      "type": "image",
+      "translation": [
+        0.592,
+        0.002,
+        0.99
+      ],
+      "rpy_radians": [
+        0.248,
+        -0.269,
+        1.139
+      ]
+    },
+    {
+      "name": "image_11",
+      "type": "image",
+      "translation": [
+        0.584,
+        0.095,
+        0.99
+      ],
+      "rpy_radians": [
+        0.248,
+        -0.269,
+        1.296
+      ]
+    },
+    {
+      "name": "image_12",
+      "type": "image",
+      "translation": [
+        0.611,
+        0.036,
+        0.949
+      ],
+      "rpy_radians": [
+        0.498,
+        -0.628,
+        1.281
+      ]
+    },
+    {
+      "name": "image_13",
+      "type": "image",
+      "translation": [
+        0.549,
+        0.11,
+        1.021
+      ],
+      "rpy_radians": [
+        0.283,
+        0.69,
+        -0.068
+      ]
+    },
+    {
+      "name": "image_14",
+      "type": "image",
+      "translation": [
+        0.599,
+        0.065,
+        0.967
+      ],
+      "rpy_radians": [
+        0.344,
+        0.416,
+        -0.467
+      ]
+    },
+    {
+      "name": "image_15",
+      "type": "image",
+      "translation": [
+        0.612,
+        0.17,
+        0.935
+      ],
+      "rpy_radians": [
+        0.471,
+        0.445,
+        -0.039
+      ]
+    },
+    {
+      "name": "intermediate_05",
+      "type": "intermediate",
+      "translation": [
+        0.495,
+        0.379,
+        0.923
+      ],
+      "rpy_radians": [
+        -0.566,
+        -0.501,
+        -0.272
+      ]
+    },
+    {
+      "name": "image_16",
+      "type": "image",
+      "translation": [
+        0.608,
+        0.136,
+        0.923
+      ],
+      "rpy_radians": [
+        -0.566,
+        -0.501,
+        -0.705
+      ]
+    },
+    {
+      "name": "image_17",
+      "type": "image",
+      "translation": [
+        0.557,
+        -0.014,
+        0.804
+      ],
+      "rpy_radians": [
+        -0.343,
+        0.172,
+        -0.003
+      ]
+    },
+    {
+      "name": "image_18",
+      "type": "image",
+      "translation": [
+        0.606,
+        -0.042,
+        0.768
+      ],
+      "rpy_radians": [
+        -0.532,
+        0.613,
+        -0.487
+      ]
+    },
+    {
+      "name": "image_19",
+      "type": "image",
+      "translation": [
+        0.586,
+        -0.16,
+        0.768
+      ],
+      "rpy_radians": [
+        -0.532,
+        0.613,
+        -0.685
+      ]
+    },
+    {
+      "name": "image_20",
+      "type": "image",
+      "translation": [
+        0.545,
+        0.135,
+        0.827
+      ],
+      "rpy_radians": [
+        -0.436,
+        0.302,
+        -0.044
+      ]
+    },
+    {
+      "name": "image_21",
+      "type": "image",
+      "translation": [
+        0.444,
+        0.108,
+        0.798
+      ],
+      "rpy_radians": [
+        -0.337,
+        -0.41,
+        0.313
+      ]
+    }
+  ]
+}

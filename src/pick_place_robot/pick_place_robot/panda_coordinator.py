@@ -2,6 +2,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
+from geometry_msgs.msg import TransformStamped
+from tf2_ros import Buffer, TransformListener, TransformException
 
 import math
 import time
@@ -9,9 +11,18 @@ import threading
 
 from std_msgs.msg import String
 
-from pick_place_robot.panda_arm_control import PandaArmControl
+from pick_place_robot.panda_arm_control import (
+    ARM_JOINT_NAMES,
+    HOME_JOINT_POSITIONS,
+    PandaArmControl,
+)
 from pick_place_robot.panda_gripper_control import PandaGripperControl
-from pick_place_interfaces.srv import PlanToTaskPose, ExecuteTaskPose
+from pick_place_interfaces.srv import (
+    ExecuteTaskPose,
+    PlanToJointPositions,
+    PlanToTaskPose,
+    ExecuteHome,
+)
 from pick_place_interfaces.msg import TaskSpacePose as TaskSpacePoseMsg
 
 class PandaCoordinatorNode(Node):
@@ -50,11 +61,24 @@ class PandaCoordinatorNode(Node):
             "plan_to_task_pose",
             callback_group=self._planner_client_callback_group,
         )
+
+        self._plan_to_joint_positions_client = self.create_client(
+            PlanToJointPositions,
+            "plan_to_joint_positions",
+            callback_group=self._planner_client_callback_group,
+        )
         
         self._execute_task_pose_service = self.create_service(
             ExecuteTaskPose,
             "execute_task_pose",
             self.execute_task_pose_callback,
+            callback_group=self._service_callback_group,
+        )
+
+        self._execute_home_position_service = self.create_service(
+            ExecuteHome,
+            "execute_home_position",
+            self.execute_home_position_callback,
             callback_group=self._service_callback_group,
         )
 
@@ -67,6 +91,19 @@ class PandaCoordinatorNode(Node):
             self,
             callback_group=self._gripper_action_callback_group,
         )
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+
+        self._robot_base_frame = "panda_link0"
+        self._robot_tool_frame = "panda_hand_tcp"
+
+        self._task_pose_position_tolerance_m = 0.010
+        self._task_pose_orientation_tolerance_rad = math.radians(8.0)
+        self._task_pose_max_attempts = 3
+        self._post_motion_settle_time_sec = 0.25
+        self._large_position_error_abort_m = 0.050
+        self._large_orientation_error_abort_rad = math.radians(20.0)
 
 
         self._is_ready = False
@@ -144,89 +181,59 @@ class PandaCoordinatorNode(Node):
     
     def wait_for_planner_service(self) -> bool:
         """
-        Wait for the planner service to become available.
+        Wait for the planner services to become available.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the service became available, otherwise False.
+            bool: True if the services became available, otherwise False.
         """
-        self.get_logger().info("Waiting for plan_to_task_pose service...")
+        self.get_logger().info("Waiting for planner services...")
 
         while rclpy.ok():
-            if self._plan_to_task_pose_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().info("plan_to_task_pose service is available.")
+            task_pose_ready = self._plan_to_task_pose_client.wait_for_service(timeout_sec=1.0)
+            joint_goal_ready = self._plan_to_joint_positions_client.wait_for_service(timeout_sec=1.0)
+
+            if task_pose_ready and joint_goal_ready:
+                self.get_logger().info("Planner services are available.")
                 return True
 
             self.get_logger().info(
-                "plan_to_task_pose service not available yet, waiting again..."
+                "Planner services not available yet, waiting again..."
             )
 
         return False
-
-    def execute_task_pose_callback(
+    
+    def lookup_current_tool_transform(
         self,
-        request: ExecuteTaskPose.Request,
-        response: ExecuteTaskPose.Response,
-    ) -> ExecuteTaskPose.Response:
+        timeout_sec: float = 1.0,
+    ) -> TransformStamped | None:
         """
-        Plan and execute motion to a requested task-space pose.
+        Look up the latest robot base to tool transform.
 
         Inputs:
-            request: Execute-task-pose service request.
-            response: Execute-task-pose service response to populate.
+            timeout_sec: Maximum TF wait time in seconds.
 
         Returns:
-            ExecuteTaskPose.Response: Populated execution result.
+            TransformStamped | None: Latest transform if available.
         """
-        if not self.require_ready():
-            response.success = False
-            response.message = (
-                "Coordinator is not ready. Startup sequence is not complete."
-            )
-            return response
-        
-        self.get_logger().info(
-            f"execute_task_pose request received: "
-            f"x={request.pose.x:.3f}, y={request.pose.y:.3f}, z={request.pose.z:.3f}, "
-            f"roll={request.pose.roll:.3f}, pitch={request.pose.pitch:.3f}, yaw={request.pose.yaw:.3f}, "
-            f"speed_scale={request.speed_scale:.3f}"
+        deadline = time.time() + timeout_sec
+
+        while rclpy.ok() and time.time() < deadline:
+            try:
+                return self._tf_buffer.lookup_transform(
+                    self._robot_base_frame,
+                    self._robot_tool_frame,
+                    rclpy.time.Time(),
+                )
+            except TransformException:
+                time.sleep(0.02)
+
+        self.get_logger().warn(
+            f"Timed out looking up TF {self._robot_base_frame} -> {self._robot_tool_frame}."
         )
-
-        success, message = self.plan_and_move_to_pose(
-            request.pose,
-            speed_scale=request.speed_scale,
-        )
-
-        response.success = success
-        response.message = message
-
-        self.get_logger().info(
-            f"execute_task_pose returning: success={response.success}, message='{response.message}'"
-        )
-
-        return response
-
-    def run_startup_sequence(self) -> bool:
-        """
-        Run a simple first coordinated behavior:
-        move the arm home, open the gripper, then close the gripper.
-
-        Inputs:
-            None
-
-        Returns:
-            bool: True if the full sequence succeeded, otherwise False.
-        """
-        self.get_logger().info("Starting coordinator motion sequence...")
-
-        if not self._arm.move_home():
-            self.get_logger().error("Coordinator failed during arm home motion.")
-            return False
-
-        self.get_logger().info("Coordinator motion sequence completed successfully.")
-        return True
+        return None
     
     def pose_to_orientation_xyzw(
         self,
@@ -259,6 +266,182 @@ class PandaCoordinatorNode(Node):
         qw = cr * cp * cy + sr * sp * sy
 
         return (qx, qy, qz, qw)
+
+    def normalize_quaternion(
+        self,
+        qx: float,
+        qy: float,
+        qz: float,
+        qw: float,
+    ) -> tuple[float, float, float, float]:
+        """
+        Normalize a quaternion.
+
+        Inputs:
+            qx: Quaternion x.
+            qy: Quaternion y.
+            qz: Quaternion z.
+            qw: Quaternion w.
+
+        Returns:
+            tuple[float, float, float, float]: Normalized quaternion.
+        """
+        norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+
+        if norm <= 1e-12:
+            return 0.0, 0.0, 0.0, 1.0
+
+        return qx / norm, qy / norm, qz / norm, qw / norm
+
+    def compute_position_error_m(
+        self,
+        pose: TaskSpacePoseMsg,
+        transform: TransformStamped,
+    ) -> float:
+        """
+        Compute Euclidean position error between a requested task pose and a TF transform.
+
+        Inputs:
+            pose: Requested task-space pose.
+            transform: Measured base-to-tool TF transform.
+
+        Returns:
+            float: Position error in meters.
+        """
+        dx = transform.transform.translation.x - pose.x
+        dy = transform.transform.translation.y - pose.y
+        dz = transform.transform.translation.z - pose.z
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    def compute_orientation_error_rad(
+        self,
+        pose: TaskSpacePoseMsg,
+        transform: TransformStamped,
+    ) -> float:
+        """
+        Compute the shortest angular distance between requested and measured orientation.
+
+        Inputs:
+            pose: Requested task-space pose.
+            transform: Measured base-to-tool TF transform.
+
+        Returns:
+            float: Orientation error in radians.
+        """
+        requested_qx, requested_qy, requested_qz, requested_qw = self.pose_to_orientation_xyzw(
+            pose
+        )
+        actual_qx = transform.transform.rotation.x
+        actual_qy = transform.transform.rotation.y
+        actual_qz = transform.transform.rotation.z
+        actual_qw = transform.transform.rotation.w
+
+        requested_qx, requested_qy, requested_qz, requested_qw = self.normalize_quaternion(
+            requested_qx,
+            requested_qy,
+            requested_qz,
+            requested_qw,
+        )
+        actual_qx, actual_qy, actual_qz, actual_qw = self.normalize_quaternion(
+            actual_qx,
+            actual_qy,
+            actual_qz,
+            actual_qw,
+        )
+
+        dot = (
+            requested_qx * actual_qx
+            + requested_qy * actual_qy
+            + requested_qz * actual_qz
+            + requested_qw * actual_qw
+        )
+        dot = max(-1.0, min(1.0, abs(dot)))
+        return 2.0 * math.acos(dot)
+    
+    def verify_task_pose_reached(
+        self,
+        pose: TaskSpacePoseMsg,
+        position_tolerance_m: float,
+        orientation_tolerance_rad: float,
+    ) -> tuple[bool, str, float | None, float | None]:
+        """
+        Verify the current TCP pose against the requested task-space pose.
+
+        Inputs:
+            pose: Requested task-space pose.
+            position_tolerance_m: Allowed position error in meters.
+            orientation_tolerance_rad: Allowed orientation error in radians.
+
+        Returns:
+            tuple[bool, str, float | None, float | None]:
+                Verification success, status message, measured position error,
+                and measured orientation error.
+        """
+        transform = self.lookup_current_tool_transform(timeout_sec=1.0)
+
+        if transform is None:
+            return False, "Could not verify final TCP pose because TF lookup failed.", None, None
+
+        position_error_m = self.compute_position_error_m(pose, transform)
+        orientation_error_rad = self.compute_orientation_error_rad(pose, transform)
+
+        measured_x = transform.transform.translation.x
+        measured_y = transform.transform.translation.y
+        measured_z = transform.transform.translation.z
+
+        message = (
+            "Final TCP verification: "
+            f"requested=({pose.x:.4f}, {pose.y:.4f}, {pose.z:.4f}), "
+            f"actual=({measured_x:.4f}, {measured_y:.4f}, {measured_z:.4f}), "
+            f"position_error_m={position_error_m:.4f}, "
+            f"orientation_error_deg={math.degrees(orientation_error_rad):.2f}"
+        )
+
+        within_tolerance = (
+            position_error_m <= position_tolerance_m
+            and orientation_error_rad <= orientation_tolerance_rad
+        )
+
+        return within_tolerance, message, position_error_m, orientation_error_rad
+
+    def run_startup_sequence(self) -> bool:
+        """
+        Run a simple first coordinated behavior:
+        move the arm home, open the gripper, then close the gripper.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if the full sequence succeeded, otherwise False.
+        """
+        self.get_logger().info("Starting coordinator motion sequence...")
+
+        if not self._arm.move_home_unplanned():
+            self.get_logger().error("Coordinator failed during arm home motion.")
+            return False
+
+        self.get_logger().info("Coordinator motion sequence completed successfully.")
+        return True
+    
+    def create_home_pose(self) -> TaskSpacePoseMsg:
+        """
+        Create the nominal home task-space pose for planned recovery.
+
+        Inputs:
+            None
+
+        Returns:
+            TaskSpacePoseMsg: Home pose for planner-based recovery.
+        """
+        return TaskSpacePoseMsg(
+            x=0.45,
+            y=0.00,
+            z=0.55,
+            roll=3.14159,
+            pitch=0.0,
+            yaw=0.0,
+        )
     
     def create_grasp_pose(self, object_pose: TaskSpacePoseMsg) -> TaskSpacePoseMsg:
         """
@@ -450,86 +633,91 @@ class PandaCoordinatorNode(Node):
 
         return response
     
-    def plan_to_pose(self, pose: TaskSpacePoseMsg) -> bool:
+    def request_plan_to_joint_positions(
+        self,
+        joint_names: list[str],
+        joint_positions: list[float],
+    ) -> PlanToJointPositions.Response | None:
         """
-        Request a plan to a task-space pose and log the result.
+        Request a joint-trajectory plan for a joint-space target from the planner service.
 
         Inputs:
-            pose: The target end-effector pose in task space.
+            joint_names: Ordered list of joint names.
+            joint_positions: Ordered list of target joint positions in radians.
 
         Returns:
-            bool: True if planning succeeded, otherwise False.
+            PlanToJointPositions.Response | None:
+                Service response if successful, otherwise None.
         """
+        request = PlanToJointPositions.Request()
+        request.joint_names = joint_names
+        request.joint_positions = joint_positions
 
-        if not self.require_ready():
-            return False
+        future = self._plan_to_joint_positions_client.call_async(request)
 
-        self.get_logger().info("Requesting a plan from the Panda planner service...")
+        while rclpy.ok() and not future.done():
+            time.sleep(0.01)
 
-        response = self.request_plan_to_task_pose(
-            pose,
-            use_orientation_constraint=False,
-        )
+        if not future.done():
+            self.get_logger().warn(
+                "Plan-to-joint-positions service call did not complete."
+            )
+            return None
+
+        if future.exception() is not None:
+            self.get_logger().error(
+                f"Plan-to-joint-positions service call raised an exception: {future.exception()}"
+            )
+            return None
+
+        response = future.result()
 
         if response is None:
-            self.get_logger().error("Planning request failed because no response was received.")
-            return False
-
-        self.get_logger().info(f"Planning success: {response.success}")
-        self.get_logger().info(f"Planning message: {response.message}")
-
-        if response.joint_trajectory.points:
-            self.get_logger().info(
-                f"Planned joint trajectory points: {len(response.joint_trajectory.points)}"
+            self.get_logger().warn(
+                "Plan-to-joint-positions service returned no response."
             )
+            return None
 
-        return response.success
+        return response
     
-    def plan_and_move_to_pose(
+    def execute_pose_once(
         self,
         pose: TaskSpacePoseMsg,
         speed_scale: float = 1.0,
+        use_orientation_constraint: bool = False,
+        orientation_tolerance_rad: float = 1.0,
     ) -> tuple[bool, str]:
         """
-        Request a plan to a task-space pose and execute the returned joint trajectory.
+        Plan and execute a single task-space motion attempt without internal retries.
 
         Inputs:
             pose: The target end-effector pose in task space.
             speed_scale: Motion speed scale factor for trajectory execution.
+            use_orientation_constraint: True to request constrained planning.
+            orientation_tolerance_rad: Allowed orientation error in radians for
+                constrained planning.
 
         Returns:
             tuple[bool, str]:
                 Success flag and descriptive result message.
         """
-        if not self.require_ready():
-            return False, "Coordinator is not ready. Startup sequence is not complete."
-
-        self.get_logger().info(
-            "Requesting planning and arm execution for a task-space pose..."
-        )
-
         response = self.request_plan_to_task_pose(
             pose,
-            use_orientation_constraint=False,
+            use_orientation_constraint=use_orientation_constraint,
+            orientation_tolerance_rad=orientation_tolerance_rad,
         )
 
         if response is None:
-            message = "Cannot execute motion because no planning response was received."
-            self.get_logger().error(message)
-            return False, message
+            return False, "No planning response was received."
 
         self.get_logger().info(f"Planning success: {response.success}")
         self.get_logger().info(f"Planning message: {response.message}")
 
         if not response.success:
-            message = "Cannot execute motion because planning failed."
-            self.get_logger().error(message)
-            return False, message
+            return False, "Planning failed."
 
         if not response.joint_trajectory.points:
-            message = "Cannot execute motion because no joint trajectory was returned."
-            self.get_logger().error(message)
-            return False, message
+            return False, "No joint trajectory was returned."
 
         self.get_logger().info(
             f"Executing planned joint trajectory with "
@@ -542,129 +730,473 @@ class PandaCoordinatorNode(Node):
         )
 
         if not motion_succeeded:
-            message = "Arm motion failed after successful planning."
-            self.get_logger().error(message)
-            return False, message
+            return False, "Arm motion failed after successful planning."
 
-        message = "Planned arm motion completed successfully."
-        self.get_logger().info(message)
-        return True, message
+        time.sleep(self._post_motion_settle_time_sec)
+
+        return True, "Single execution attempt completed."
     
-    def plan_and_move_to_pose_with_orientation_constraint(
+    def plan_and_move_home(
         self,
-        pose: TaskSpacePoseMsg,
-        orientation_tolerance_rad: float = 1.0,
-    ) -> bool:
+        speed_scale: float = 1.0,
+    ) -> tuple[bool, str]:
         """
-        Request a constrained plan to a task-space pose and execute the returned
-        joint trajectory.
+        Plan and execute motion to the nominal home joint configuration.
 
         Inputs:
-            pose: The target end-effector pose in task space.
-            orientation_tolerance_rad: Maximum allowed orientation error in radians
-                about each axis.
+            speed_scale: Motion speed scale factor for trajectory execution.
 
         Returns:
-            bool: True if planning and execution both succeeded, otherwise False.
+            tuple[bool, str]:
+                Success flag and descriptive result message.
         """
-        if not self.require_ready():
-            return False
-        
-        self.get_logger().info(
-            "Requesting constrained planning and arm execution for a task-space pose..."
-        )
+        self.get_logger().info("Attempting planned recovery move to home joint configuration.")
 
-        response = self.request_plan_to_task_pose(
-            pose,
-            use_orientation_constraint=True,
-            orientation_tolerance_rad=orientation_tolerance_rad,
+        response = self.request_plan_to_joint_positions(
+            joint_names=ARM_JOINT_NAMES,
+            joint_positions=HOME_JOINT_POSITIONS,
         )
 
         if response is None:
-            self.get_logger().error(
-                "Cannot execute motion because no constrained planning response was received."
-            )
-            return False
+            return False, "No joint-space planning response was received for home recovery."
 
         self.get_logger().info(f"Planning success: {response.success}")
         self.get_logger().info(f"Planning message: {response.message}")
 
         if not response.success:
-            self.get_logger().error(
-                "Cannot execute motion because constrained planning failed."
-            )
-            return False
+            return False, "Joint-space planning to home failed."
 
         if not response.joint_trajectory.points:
-            self.get_logger().error(
-                "Cannot execute motion because no joint trajectory was returned."
-            )
-            return False
+            return False, "Joint-space planning to home returned no joint trajectory."
 
         self.get_logger().info(
-            f"Executing planned joint trajectory with "
+            f"Executing planned home joint trajectory with "
             f"{len(response.joint_trajectory.points)} points."
         )
 
         motion_succeeded = self._arm.move_to_joint_trajectory(
             response.joint_trajectory,
+            speed_scale=speed_scale,
+        )
+
+        if not motion_succeeded:
+            return False, "Planned home joint motion failed after successful planning."
+
+        time.sleep(self._post_motion_settle_time_sec)
+
+        return True, "Planned recovery move to home joint configuration succeeded."
+    
+    def plan_and_move_to_pose(
+        self,
+        pose: TaskSpacePoseMsg,
+        speed_scale: float = 1.0,
+    ) -> tuple[bool, str]:
+        """
+        Request a plan to a task-space pose, execute it, verify final TCP pose,
+        and replan a bounded number of times if needed.
+
+        Inputs:
+            pose: The target end-effector pose in task space.
+            speed_scale: Motion speed scale factor for trajectory execution.
+
+        Returns:
+            tuple[bool, str]:
+                Success flag and descriptive result message.
+        """
+        if not self.require_ready():
+            return False, "Coordinator is not ready. Startup sequence is not complete."
+
+        last_message = "Task-space motion did not complete successfully."
+        last_failure_was_tolerance_only = False
+        last_verify_message = ""
+
+        for attempt_index in range(1, self._task_pose_max_attempts + 1):
+            self.get_logger().info(
+                f"Task-space execution attempt {attempt_index}/{self._task_pose_max_attempts}."
+            )
+
+            response = self.request_plan_to_task_pose(
+                pose,
+                use_orientation_constraint=False,
+            )
+
+            if response is None:
+                last_message = "Cannot execute motion because no planning response was received."
+                last_failure_was_tolerance_only = False
+                self.get_logger().error(last_message)
+                continue
+
+            self.get_logger().info(f"Planning success: {response.success}")
+            self.get_logger().info(f"Planning message: {response.message}")
+
+            if not response.success:
+                last_message = "Cannot execute motion because planning failed."
+                last_failure_was_tolerance_only = False
+                self.get_logger().error(last_message)
+                continue
+
+            if not response.joint_trajectory.points:
+                last_message = "Cannot execute motion because no joint trajectory was returned."
+                last_failure_was_tolerance_only = False
+                self.get_logger().error(last_message)
+                continue
+
+            self.get_logger().info(
+                f"Executing planned joint trajectory with "
+                f"{len(response.joint_trajectory.points)} points."
+            )
+
+            motion_succeeded = self._arm.move_to_joint_trajectory(
+                response.joint_trajectory,
+                speed_scale=speed_scale,
+            )
+
+            if not motion_succeeded:
+                last_message = "Arm motion failed after successful planning."
+                last_failure_was_tolerance_only = False
+                self.get_logger().error(last_message)
+                continue
+
+            time.sleep(self._post_motion_settle_time_sec)
+
+            reached_pose, verify_message, position_error_m, orientation_error_rad = (
+                self.verify_task_pose_reached(
+                    pose,
+                    position_tolerance_m=self._task_pose_position_tolerance_m,
+                    orientation_tolerance_rad=self._task_pose_orientation_tolerance_rad,
+                )
+            )
+
+            if reached_pose:
+                success_message = (
+                    "Planned arm motion completed successfully and final TCP pose "
+                    "was within tolerance. "
+                    + verify_message
+                )
+                self.get_logger().info(success_message)
+                return True, success_message
+
+            last_message = (
+                "Arm motion executed but final TCP pose was outside tolerance. "
+                + verify_message
+            )
+            last_failure_was_tolerance_only = True
+            last_verify_message = verify_message
+            self.get_logger().error(last_message)
+
+            large_error_detected = (
+                position_error_m is not None
+                and orientation_error_rad is not None
+                and (
+                    position_error_m > self._large_position_error_abort_m
+                    or orientation_error_rad > self._large_orientation_error_abort_rad
+                )
+            )
+
+            if large_error_detected:
+                self.get_logger().error(
+                    "Final TCP error was large. Attempting planned recovery move to home "
+                    "before retrying the requested task pose."
+                )
+
+                recovered_home, recovery_message = self.plan_and_move_home(
+                    speed_scale=speed_scale,
+                )
+
+                if not recovered_home:
+                    abort_message = (
+                        "Aborting retries because final TCP error was too large and "
+                        "planned recovery to home failed. "
+                        f"Recovery message: {recovery_message}. "
+                        + verify_message
+                    )
+                    self.get_logger().error(abort_message)
+                    return False, abort_message
+
+                self.get_logger().info(
+                    "Planned recovery move to home succeeded. Will retry the requested task pose."
+                )
+                continue
+
+        if last_failure_was_tolerance_only:
+            self.get_logger().error(
+                "Task-space motion exhausted normal retries while remaining outside "
+                "tolerance. Attempting final planned recovery move to home before one "
+                "last retry."
+            )
+
+            recovered_home, recovery_message = self.plan_and_move_home(
+                speed_scale=speed_scale,
+            )
+
+            if not recovered_home:
+                failure_message = (
+                    f"Task-space motion failed after {self._task_pose_max_attempts} attempts, "
+                    f"and planned recovery to home also failed. "
+                    f"Recovery message: {recovery_message}. "
+                    + last_message
+                )
+                self.get_logger().error(failure_message)
+                return False, failure_message
+
+            self.get_logger().info(
+                "Final planned recovery move to home succeeded. Attempting one last retry "
+                "for the requested task pose."
+            )
+
+            final_retry_succeeded, final_retry_message = self.execute_pose_once(
+                pose,
+                speed_scale=speed_scale,
+                use_orientation_constraint=False,
+            )
+
+            if not final_retry_succeeded:
+                failure_message = (
+                    f"Task-space motion failed after {self._task_pose_max_attempts} attempts, "
+                    f"and the final retry after planned home recovery also failed. "
+                    f"Final retry message: {final_retry_message}"
+                )
+                self.get_logger().error(failure_message)
+                return False, failure_message
+
+            reached_pose, verify_message, _, _ = self.verify_task_pose_reached(
+                pose,
+                position_tolerance_m=self._task_pose_position_tolerance_m,
+                orientation_tolerance_rad=self._task_pose_orientation_tolerance_rad,
+            )
+
+            if reached_pose:
+                success_message = (
+                    "Task-space motion succeeded after planned home recovery and final retry. "
+                    + verify_message
+                )
+                self.get_logger().info(success_message)
+                return True, success_message
+
+            failure_message = (
+                "Final retry after planned home recovery executed, but TCP remained outside "
+                "tolerance. "
+                + verify_message
+            )
+            self.get_logger().error(failure_message)
+            return False, failure_message
+
+        failure_message = (
+            f"Task-space motion failed after {self._task_pose_max_attempts} attempts. "
+            + last_message
+        )
+        self.get_logger().error(failure_message)
+        return False, failure_message
+    
+    def plan_and_move_to_pose_with_orientation_constraint(
+        self,
+        pose: TaskSpacePoseMsg,
+        orientation_tolerance_rad: float = 1.0,
+        speed_scale: float = 1.0,
+    ) -> tuple[bool, str]:
+        """
+        Request a constrained plan to a task-space pose, execute it, verify final
+        TCP pose, and replan a bounded number of times if needed.
+
+        Inputs:
+            pose: The target end-effector pose in task space.
+            orientation_tolerance_rad: Maximum allowed orientation error in radians
+                about each axis during constrained planning.
+            speed_scale: Motion speed scale factor for trajectory execution.
+
+        Returns:
+            tuple[bool, str]:
+                Success flag and descriptive result message.
+        """
+        if not self.require_ready():
+            return False, "Coordinator is not ready. Startup sequence is not complete."
+
+        last_message = "Constrained task-space motion did not complete successfully."
+
+        for attempt_index in range(1, self._task_pose_max_attempts + 1):
+            self.get_logger().info(
+                f"Constrained task-space execution attempt "
+                f"{attempt_index}/{self._task_pose_max_attempts}."
+            )
+
+            response = self.request_plan_to_task_pose(
+                pose,
+                use_orientation_constraint=True,
+                orientation_tolerance_rad=orientation_tolerance_rad,
+            )
+
+            if response is None:
+                last_message = (
+                    "Cannot execute constrained motion because no planning response "
+                    "was received."
+                )
+                self.get_logger().error(last_message)
+                continue
+
+            self.get_logger().info(f"Planning success: {response.success}")
+            self.get_logger().info(f"Planning message: {response.message}")
+
+            if not response.success:
+                last_message = "Cannot execute constrained motion because planning failed."
+                self.get_logger().error(last_message)
+                continue
+
+            if not response.joint_trajectory.points:
+                last_message = (
+                    "Cannot execute constrained motion because no joint trajectory "
+                    "was returned."
+                )
+                self.get_logger().error(last_message)
+                continue
+
+            self.get_logger().info(
+                f"Executing constrained joint trajectory with "
+                f"{len(response.joint_trajectory.points)} points."
+            )
+
+            motion_succeeded = self._arm.move_to_joint_trajectory(
+                response.joint_trajectory,
+                speed_scale=speed_scale,
+            )
+
+            if not motion_succeeded:
+                last_message = "Arm motion failed after successful constrained planning."
+                self.get_logger().error(last_message)
+                continue
+
+            time.sleep(self._post_motion_settle_time_sec)
+
+            reached_pose, verify_message, position_error_m, measured_orientation_error_rad = (
+                self.verify_task_pose_reached(
+                    pose,
+                    position_tolerance_m=self._task_pose_position_tolerance_m,
+                    orientation_tolerance_rad=self._task_pose_orientation_tolerance_rad,
+                )
+            )
+
+            if reached_pose:
+                success_message = (
+                    "Constrained planned arm motion completed successfully and final TCP "
+                    "pose was within tolerance. "
+                    + verify_message
+                )
+                self.get_logger().info(success_message)
+                return True, success_message
+
+            last_message = (
+                "Constrained arm motion executed but final TCP pose was outside tolerance. "
+                + verify_message
+            )
+            self.get_logger().warn(last_message)
+
+            large_error_detected = (
+                position_error_m is not None
+                and measured_orientation_error_rad is not None
+                and (
+                    position_error_m > self._large_position_error_abort_m
+                    or measured_orientation_error_rad > self._large_orientation_error_abort_rad
+                )
+            )
+
+            if large_error_detected:
+                abort_message = (
+                    "Aborting constrained-motion retries because final TCP error was too "
+                    "large for a safe replan. "
+                    + verify_message
+                )
+                self.get_logger().error(abort_message)
+                return False, abort_message
+
+        failure_message = (
+            f"Constrained task-space motion failed after "
+            f"{self._task_pose_max_attempts} attempts. "
+            + last_message
+        )
+        self.get_logger().error(failure_message)
+        return False, failure_message
+
+    def execute_home_position_callback(
+        self,
+        request: ExecuteHome.Request,
+        response: ExecuteHome.Response,
+    ) -> ExecuteHome.Response:
+        """
+        Execute a planned move to the home joint configuration.
+
+        Inputs:
+            request: Execute-home service request.
+            response: Service response to populate.
+
+        Returns:
+            ExecuteHome.Response: Populated execution result.
+        """
+        if not self.require_ready():
+            response.success = False
+            response.message = (
+                "Coordinator is not ready. Startup sequence is not complete."
+            )
+            return response
+
+        self.get_logger().info(
+            "Received execute_home_position request."
+        )
+
+        success, message = self.plan_and_move_home(
             speed_scale=1.0,
         )
 
-        if not motion_succeeded:
-            self.get_logger().error(
-                "Arm motion failed after successful constrained planning."
-            )
-            return False
-
-        self.get_logger().info("Constrained planned arm motion completed successfully.")
-        return True
-    
-    def create_planning_smoke_test_pose(self) -> TaskSpacePoseMsg:
-        """
-        Create a simple task-space pose for planner/coordinator integration testing.
-
-        Inputs:
-            None
-
-        Returns:
-            TaskSpacePoseMsg: A reachable test pose for basic planning validation.
-        """
-        return TaskSpacePoseMsg(
-            x=0.45,
-            y=0.00,
-            z=0.55,
-            roll=3.14159,
-            pitch=0.0,
-            yaw=0.0,
-        )
-
-    def run_planning_smoke_test(self) -> bool:
-        """
-        Run a simple planner/coordinator integration smoke test.
-
-        Inputs:
-            None
-
-        Returns:
-            bool: True if the test motion completed successfully, otherwise False.
-        """
-        test_pose = self.create_planning_smoke_test_pose()
-
-        self.get_logger().info("Starting planner/coordinator smoke test...")
-
-        motion_succeeded = self.plan_and_move_to_pose(test_pose)
-
-        if not motion_succeeded:
-            self.get_logger().error(
-                "Planner/coordinator smoke test failed."
-            )
-            return False
+        response.success = success
+        response.message = message
 
         self.get_logger().info(
-            "Planner/coordinator smoke test completed successfully."
+            f"execute_home_position returning: success={response.success}, "
+            f"message='{response.message}'"
         )
-        return True
+
+        return response
+    
+    def execute_task_pose_callback(
+        self,
+        request: ExecuteTaskPose.Request,
+        response: ExecuteTaskPose.Response,
+    ) -> ExecuteTaskPose.Response:
+        """
+        Plan and execute motion to a requested task-space pose.
+
+        Inputs:
+            request: Execute-task-pose service request.
+            response: Execute-task-pose service response to populate.
+
+        Returns:
+            ExecuteTaskPose.Response: Populated execution result.
+        """
+        if not self.require_ready():
+            response.success = False
+            response.message = (
+                "Coordinator is not ready. Startup sequence is not complete."
+            )
+            return response
+        
+        self.get_logger().info(
+            f"execute_task_pose request received: "
+            f"x={request.pose.x:.3f}, y={request.pose.y:.3f}, z={request.pose.z:.3f}, "
+            f"roll={request.pose.roll:.3f}, pitch={request.pose.pitch:.3f}, yaw={request.pose.yaw:.3f}, "
+            f"speed_scale={request.speed_scale:.3f}"
+        )
+
+        success, message = self.plan_and_move_to_pose(
+            request.pose,
+            speed_scale=request.speed_scale,
+        )
+
+        response.success = success
+        response.message = message
+
+        self.get_logger().info(
+            f"execute_task_pose returning: success={response.success}, message='{response.message}'"
+        )
+
+        return response
 
 def main(args=None):
     rclpy.init(args=args)
