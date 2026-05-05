@@ -9,4 +9,7 @@ arm:
   planner_configs:
     - RRTConnectkConfigDefault
   projection_evaluator: joints(panda_joint1,panda_joint2)
-  longest_valid_segment_fraction: 0.002
+  # 0.002 was very conservative and caused high collision-check overhead when
+  # a large obstacle (conveyor) is present.  0.005 still gives good path
+  # accuracy while halving the number of segment validity checks.
+  longest_valid_segment_fraction: 0.005

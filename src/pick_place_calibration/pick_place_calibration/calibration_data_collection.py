@@ -135,6 +135,18 @@ class CalibrationDataCollection:
             )
 
         return False
+
+    def get_current_session_dir(self) -> Path:
+        """
+        Return the current calibration session directory.
+
+        Inputs:
+            None
+
+        Returns:
+            Path: Current session directory path.
+        """
+        return self._session_output_dir
     
     def request_camera_snapshot(
         self,

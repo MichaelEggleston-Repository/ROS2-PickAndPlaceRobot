@@ -439,7 +439,7 @@
     <child link="panda_leftfinger"/>
     <origin rpy="0 0 0" xyz="0 0 0.0584"/>
     <axis xyz="0 1 0"/>
-    <limit effort="20" lower="0" upper="0.04" velocity="0.2"/>
+    <limit effort="40" lower="0" upper="0.04" velocity="0.2"/>
     <dynamics damping="3.0" friction="0.4"/>
   </joint>
   <transmission name="panda_finger_joint1_transmission">
@@ -483,7 +483,7 @@
     <child link="panda_rightfinger"/>
     <origin rpy="0 0 0" xyz="0 0 0.0584"/>
     <axis xyz="0 -1 0"/>
-    <limit effort="20" lower="0" upper="0.04" velocity="0.2"/>
+    <limit effort="40" lower="0" upper="0.04" velocity="0.2"/>
     <dynamics damping="3.0" friction="0.4"/>
   </joint>
   <transmission name="panda_finger_joint2_transmission">
@@ -543,7 +543,7 @@
       <collision>
         <origin xyz="0 0 0" rpy="1.5708 0 0"/>
         <geometry>
-          <box size="0.25 0.005 0.25"/>
+          <box size="0.25 0.006 0.25"/>
         </geometry>
       </collision>
 
@@ -570,6 +570,24 @@
     </hardware>
     <joint name="panda_finger_joint1">
       <param name="initial_position">0.0</param>
+      <!-- Explicit PID gains for ign_ros2_control's internal position
+           controller. Without these the plugin uses hardware defaults that
+           can be inconsistent between joints, causing one finger to respond
+           much faster than the other. Both joints use identical gains so
+           symmetric open/close motion is enforced.
+           kp=1000 matches the increased effort limit of 40 N: at full open
+           (0.04 m error) the PID outputs 1000 * 0.04 = 40 N, giving real
+           headroom above friction and gravity components at any wrist angle.
+           kd=30 targets critical damping: with finger mass ~0.224 kg the
+           undamped natural frequency is ωn = sqrt(kp/m) ≈ 67 rad/s, and
+           critical kd = 2·sqrt(kp·m) = 2·sqrt(1000·0.224) ≈ 30 N·s/m.
+           The previous kd=10 gave ζ ≈ 0.33 (underdamped), causing joint2
+           to overshoot onto the 0.040 m hard limit on short open moves
+           (e.g. 0.025 → 0.034 m after a grasp). kd=30 gives ζ ≈ 1.0
+           (critically damped), eliminating overshoot entirely. -->
+      <param name="kp">1000.0</param>
+      <param name="ki">0.0</param>
+      <param name="kd">30.0</param>
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
@@ -577,6 +595,9 @@
     </joint>
     <joint name="panda_finger_joint2">
       <param name="initial_position">0.0</param>
+      <param name="kp">1000.0</param>
+      <param name="ki">0.0</param>
+      <param name="kd">30.0</param>
       <command_interface name="position"/>
       <state_interface name="position"/>
       <state_interface name="velocity"/>
@@ -588,4 +609,5 @@
       <parameters>/home/michael/Projects/ROS2-PickAndPlaceRobot/src/pick_place_moveit_config/config/controllers_position.yaml</parameters>
     </plugin>
   </gazebo>
+
 </robot>

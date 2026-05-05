@@ -173,26 +173,27 @@ class PandaArmControl:
         if final_point.accelerations:
             final_point.accelerations = [0.0] * len(final_point.accelerations)
 
-        hold_point = deepcopy(final_point)
+        if terminal_hold_sec > 0.0:
+            hold_point = deepcopy(final_point)
 
-        if hold_point.velocities:
-            hold_point.velocities = [0.0] * len(hold_point.velocities)
+            if hold_point.velocities:
+                hold_point.velocities = [0.0] * len(hold_point.velocities)
 
-        if hold_point.accelerations:
-            hold_point.accelerations = [0.0] * len(hold_point.accelerations)
+            if hold_point.accelerations:
+                hold_point.accelerations = [0.0] * len(hold_point.accelerations)
 
-        final_time_sec = (
-            float(final_point.time_from_start.sec)
-            + float(final_point.time_from_start.nanosec) / 1e9
-        )
-        hold_time_sec = final_time_sec + terminal_hold_sec
+            final_time_sec = (
+                float(final_point.time_from_start.sec)
+                + float(final_point.time_from_start.nanosec) / 1e9
+            )
+            hold_time_sec = final_time_sec + terminal_hold_sec
 
-        hold_point.time_from_start.sec = int(hold_time_sec)
-        hold_point.time_from_start.nanosec = int(
-            (hold_time_sec - int(hold_time_sec)) * 1e9
-        )
+            hold_point.time_from_start.sec = int(hold_time_sec)
+            hold_point.time_from_start.nanosec = int(
+                (hold_time_sec - int(hold_time_sec)) * 1e9
+            )
 
-        prepared_trajectory.points.append(hold_point)
+            prepared_trajectory.points.append(hold_point)
 
         return prepared_trajectory
     
@@ -352,13 +353,22 @@ class PandaArmControl:
         )
         prepared_trajectory = self.prepare_joint_trajectory_for_execution(
             scaled_trajectory,
-            terminal_hold_sec=0.5,
+            terminal_hold_sec=0.0,
         )
 
         goal = FollowJointTrajectory.Goal()
         goal.trajectory = prepared_trajectory
-        goal.goal_time_tolerance.sec = 2
-        goal.goal_time_tolerance.nanosec = 0
+        # Do NOT set goal_time_tolerance here.  When goal_time_tolerance > 0
+        # the arm JTC stays in an active monitoring state after the trajectory
+        # clock expires, continuously running its update() loop on all 7 arm
+        # joints until it decides the goal is complete.  That extended
+        # transition period (up to 2 sim-seconds = ~20 wall-seconds at 10% RT)
+        # appears to cause a race condition in the controller manager that
+        # desynchronises the gripper finger joint trajectory initialisation on
+        # the very next gripper command.  With goal_time_tolerance = 0 (the
+        # default) the arm JTC transitions to IDLE immediately when the
+        # trajectory clock expires — the same behaviour as move_home_unplanned
+        # — which leaves the controller in a clean state for the gripper.
 
         self._node.get_logger().info(
             "Sending full joint trajectory to Panda arm controller: "
@@ -389,7 +399,15 @@ class PandaArmControl:
 
     def move_home_unplanned(self) -> bool:
         """
-        Move the Panda arm directly to the predefined home joint configuration.
+        Move the Panda arm directly to the predefined home joint configuration
+        WITHOUT collision-aware path planning.
+
+        *** STARTUP USE ONLY ***
+        This method sends a raw joint trajectory to the controller and does NOT
+        invoke MoveIt / OMPL.  It is intentionally restricted to the coordinator
+        startup sequence, where the arm is known to be in a safe, clear initial
+        state.  For all post-startup homing (e.g. after a step failure) use
+        plan_and_move_home() instead so that collision avoidance is active.
 
         Inputs:
             None

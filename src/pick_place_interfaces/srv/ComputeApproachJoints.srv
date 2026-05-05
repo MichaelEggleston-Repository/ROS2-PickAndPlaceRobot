@@ -1,0 +1,9 @@
+pick_place_interfaces/TaskSpacePose grasp_pose
+pick_place_interfaces/TaskSpacePose approach_pose
+int32 max_attempts
+float64 speed_scale
+---
+bool success
+string message
+string[] joint_names
+float64[] joint_positions

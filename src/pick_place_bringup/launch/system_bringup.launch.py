@@ -33,6 +33,12 @@ def generate_launch_description():
         description="If true, run the calibration data collection node.",
     )
 
+    debug_visualization_arg = DeclareLaunchArgument(
+        "debug_visualization_enabled",
+        default_value="false",
+        description="If true, show OpenCV debug overlay windows in the perception node.",
+    )
+
     simulation_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(
@@ -61,6 +67,18 @@ def generate_launch_description():
         ],
     )
 
+    pick_place_manager_node = Node(
+        package="pick_place_manager",
+        executable="pick_place_manager",
+        name="pick_place_manager",
+        output="screen",
+        parameters=[
+            {
+                "calibration_file": "/home/michael/Projects/ROS2-PickAndPlaceRobot/calibration_data/session_20260501_132539/eye_to_hand_calibration.yaml",
+            }
+        ],
+    )
+
     coordinator_node = Node(
         package="pick_place_robot",
         executable="panda_coordinator",
@@ -75,6 +93,21 @@ def generate_launch_description():
         output="screen",
     )
 
+    object_detection_node = Node(
+        package="pick_place_vision",
+        executable="object_perception",
+        name="object_perception",
+        output="screen",
+        parameters=[
+            {
+                "debug_visualization_enabled": ParameterValue(
+                    LaunchConfiguration("debug_visualization_enabled"),
+                    value_type=bool,
+                )
+            }
+        ],
+    )
+
     calibration_data_collection_node = Node(
         package="pick_place_calibration",
         executable="calibration_data_collection",
@@ -83,12 +116,57 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("run_calibration_collection")),
     )
 
+    # ---- PDDL task planner -----------------------------------------------
+    # goal_type:     "stack" | "arrange"
+    # goal_sequence: comma-separated cube IDs in goal order
+    #                stack   → bottom-to-top, e.g. "red_cube,green_cube,blue_cube"
+    #                arrange → slot_1..slot_3, e.g. "blue_cube,green_cube,red_cube"
+    # slot_N_x/y/z_surface: absolute robot-base-frame position of each conveyor slot
+    pddl_planner_node = Node(
+        package="pick_place_pddl",
+        executable="pddl_planner_node",
+        name="pddl_planner_node",
+        output="screen",
+    )
+
+    # Update manager node to include PDDL and slot position parameters.
+    # Overrides the earlier pick_place_manager_node definition so we redefine it here.
+    pick_place_manager_node = Node(
+        package="pick_place_manager",
+        executable="pick_place_manager",
+        name="pick_place_manager",
+        output="screen",
+        parameters=[
+            {
+                "calibration_file": "/home/michael/Projects/ROS2-PickAndPlaceRobot/calibration_data/session_20260501_132539/eye_to_hand_calibration.yaml",
+                # Execution mode: "pddl" runs the full task planner;
+                # "test" runs the simple single-cube pick-and-place loop.
+                "execution_mode": "pddl",
+                # PDDL goal specification.
+                "goal_type": "stack",
+                "goal_sequence": "red_cube,green_cube,blue_cube",
+                # Conveyor slot absolute positions in the robot base frame.
+                # Adjust these to match your physical (or simulated) setup.
+                "slot_1_x": 0.50,
+                "slot_1_y": -0.20,
+                "slot_2_x": 0.50,
+                "slot_2_y":  0.00,
+                "slot_3_x": 0.50,
+                "slot_3_y":  0.20,
+            }
+        ],
+    )
+
     return LaunchDescription([
         enable_calibration_arg,
         run_calibration_collection_arg,
+        debug_visualization_arg,
+        pddl_planner_node,
+        pick_place_manager_node,
         simulation_launch,
         planner_node,
         coordinator_node,
         camera_acquisition_node,
+        object_detection_node,
         calibration_data_collection_node,
     ])

@@ -1,0 +1,5 @@
+# DetectObjects.srv
+---
+bool success
+string message
+DetectedObject[] detections

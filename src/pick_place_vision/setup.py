@@ -26,6 +26,7 @@ setup(
     entry_points={
         "console_scripts": [
             "camera_acquisition = pick_place_vision.camera_acquisition:main",
+            "object_perception = pick_place_vision.object_perception:main",
         ],
     },
 )

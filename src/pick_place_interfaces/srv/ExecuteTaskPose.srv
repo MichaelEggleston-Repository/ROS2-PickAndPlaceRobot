@@ -1,5 +1,13 @@
 TaskSpacePose pose
 float64 speed_scale
+bool use_orientation_constraint
+float64 orientation_tolerance_rad
+float64 approach_height_m
+# When true and approach_height_m > 0: execute only the backward-IK + OMPL move
+# to the approach pose and return immediately — do not descend with PILZ LIN.
+# The caller is responsible for issuing a follow-up call (approach_height_m=0)
+# to execute the PILZ LIN descent as a separate, independent motion.
+bool approach_only
 ---
 bool success
 string message

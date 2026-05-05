@@ -1,4 +1,5 @@
 pick_place_interfaces/TaskSpacePose pose
+float64 speed_scale
 bool use_orientation_constraint
 float64 orientation_tolerance_rad
 ---

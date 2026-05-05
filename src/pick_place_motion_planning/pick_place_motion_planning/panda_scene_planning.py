@@ -1,9 +1,18 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSReliabilityPolicy
 
 from geometry_msgs.msg import Pose
 from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
 from shape_msgs.msg import SolidPrimitive
+
+# Use transient_local (latched) durability so messages published before the
+# MoveIt planning scene monitor subscribes are still delivered when it connects.
+_PLANNING_SCENE_QOS = QoSProfile(
+    depth=10,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+)
 
 
 class PandaPlanningScene:
@@ -21,7 +30,7 @@ class PandaPlanningScene:
         self._planning_scene_publisher = self._node.create_publisher(
             PlanningScene,
             "/planning_scene",
-            10,
+            _PLANNING_SCENE_QOS,
         )
 
         self._node.get_logger().info("Planning scene helper is ready.")
@@ -151,6 +160,18 @@ class PandaPlanningScene:
         """
         Add the fixed environment collision objects to the MoveIt planning scene.
 
+        The conveyor (SDF: 2.0 × 0.6 × 0.4 m box, centred at world z = 0.1)
+        is modelled here as a thin surface slab at z = 0.30 m rather than the
+        full 3-D body.
+
+        Using the full box causes OMPL to time out: during the grasping approach
+        the arm swings from the robot's side (y ≈ 0.6) over the conveyor to
+        reach cubes at y ≈ 0–0.1, and intermediate configurations have arm links
+        inside the z = 0–0.3 body of the box even though they are physically
+        clear of the conveyor surface.  A thin slab correctly encodes the only
+        real constraint — the arm must not descend through the conveyor top
+        surface at z = 0.30 — without blocking valid swing configurations.
+
         Inputs:
             None
 
@@ -160,8 +181,8 @@ class PandaPlanningScene:
         self.add_box_collision_object(
             object_id="conveyor_base",
             size_xyz=(2.0, 0.6, 0.4),
-            position_xyz=(0.0, 0.0, 0.2),
-            orientation_xyzw = (0.0, 0.0, 0.0, 1.0),
+            position_xyz=(0.0, 0.0, 0.1),
+            orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
             frame_id="world",
         )
 

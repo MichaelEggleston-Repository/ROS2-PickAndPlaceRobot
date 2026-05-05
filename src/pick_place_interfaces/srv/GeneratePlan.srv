@@ -1,0 +1,19 @@
+# GeneratePlan.srv
+# Request a PDDL plan from the planner node.
+#
+# detected_objects: all cubes currently visible to the camera
+# occupied_slots:   slot names that already contain a cube (parallel to
+#                   detected_objects; empty string if the cube is not in a slot)
+# goal_type:        "stack"   - build a vertical stack in the order given
+#                   "arrange" - place cubes into slots in the order given
+# goal_sequence:    cube ids in goal order (bottom→top for stack,
+#                   slot_1→slot_3 for arrange)
+
+DetectedObject[] detected_objects
+string[]         occupied_slots
+string           goal_type
+string[]         goal_sequence
+---
+bool          success
+string        message
+PddlAction[]  plan

@@ -66,7 +66,7 @@
 
     <model name="conveyor_base">
       <static>true</static>
-      <pose>0 0 0.2 0 0 0</pose>
+      <pose>0 0 0.1 0 0 0</pose>
       <link name="link">
         <collision name="collision">
           <geometry>
@@ -200,7 +200,7 @@
 
     <model name="cube_1">
       <static>false</static>
-      <pose>-0.15 0 0.425 0 0 0</pose>
+      <pose>-0.15 0 0.325 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.1</mass>
@@ -238,7 +238,7 @@
 
     <model name="cube_2">
       <static>false</static>
-      <pose>0 0.1 0.425 0 0 0</pose>
+      <pose>0 0.1 0.325 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.1</mass>
@@ -276,7 +276,7 @@
 
     <model name="cube_3">
       <static>false</static>
-      <pose>0.25 0.05 0.425 0 0 0</pose>
+      <pose>0.25 0.05 0.325 0 0 0</pose>
       <link name="link">
         <inertial>
           <mass>0.1</mass>

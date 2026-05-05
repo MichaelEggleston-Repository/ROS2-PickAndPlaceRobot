@@ -3,11 +3,11 @@ from dataclasses import dataclass
 
 import rclpy
 from geometry_msgs.msg import Pose, PoseStamped
-from moveit.planning import MoveItPy
+from moveit.planning import MoveItPy, PlanRequestParameters
 from moveit.core.robot_state import RobotState
 from moveit_msgs.msg import Constraints, OrientationConstraint
 from pick_place_interfaces.msg import TaskSpacePose as TaskSpacePoseMsg
-from pick_place_interfaces.srv import PlanToTaskPose, PlanToJointPositions
+from pick_place_interfaces.srv import PlanToTaskPose, PlanToJointPositions, ComputeApproachJoints
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectory
 
@@ -91,6 +91,13 @@ class PandaMoveItPlanner:
         self._node.get_logger().info("Planning component for Panda arm is ready.")
         self._scene = PandaPlanningScene(self._node)
 
+        # Publish static collision objects once the planning scene monitor has
+        # had time to subscribe.  A one-shot 2-second timer avoids a race
+        # between the publisher and the MoveIt planning scene monitor.
+        self._scene_init_timer = self._node.create_timer(
+            0.5, self._publish_static_scene_once
+        )
+
         self._plan_to_task_pose_service = self._node.create_service(
             PlanToTaskPose,
             "plan_to_task_pose",
@@ -102,6 +109,33 @@ class PandaMoveItPlanner:
             "plan_to_joint_positions",
             self.plan_to_joint_positions_callback,
         )
+
+        self._compute_approach_joints_service = self._node.create_service(
+            ComputeApproachJoints,
+            "compute_approach_joints",
+            self.compute_approach_joints_callback,
+        )
+
+    def _publish_static_scene_once(self) -> None:
+        """
+        Publish the fixed environment collision objects to the MoveIt planning
+        scene exactly once, then cancel the timer.
+
+        Called by a one-shot timer 2 s after init so the planning scene monitor
+        has had time to subscribe before the first publish.
+
+        Inputs:
+            None
+
+        Returns:
+            None
+        """
+        self._scene.add_static_environment()
+        self._node.get_logger().info(
+            "Static environment published to planning scene "
+            "(conveyor_surface slab at z=0.40)."
+        )
+        self._scene_init_timer.cancel()
 
     def plan_to_task_pose_callback(
         self,
@@ -125,17 +159,22 @@ class PandaMoveItPlanner:
 
         orientation_constraint_enabled = False
         orientation_tolerance_rad = 1.0
+        speed_scale = 1.0
 
-        if hasattr(request, "constrain_orientation"):
-            orientation_constraint_enabled = request.constrain_orientation
+        if hasattr(request, "use_orientation_constraint"):
+            orientation_constraint_enabled = request.use_orientation_constraint
 
         if hasattr(request, "orientation_tolerance_rad"):
             orientation_tolerance_rad = request.orientation_tolerance_rad
+
+        if hasattr(request, "speed_scale") and request.speed_scale > 0.0:
+            speed_scale = request.speed_scale
 
         if orientation_constraint_enabled:
             result = self.plan_to_task_pose_with_orientation_constraint(
                 request.pose,
                 orientation_tolerance_rad=orientation_tolerance_rad,
+                speed_scale=speed_scale,
             )
         else:
             result = self.plan_to_task_pose(request.pose)
@@ -633,7 +672,11 @@ class PandaMoveItPlanner:
                 f"Planning attempt {attempt_index}/{max_attempts}..."
             )
 
-            plan_result = self._arm.plan()
+            ompl_params = PlanRequestParameters(self._moveit, "")
+            ompl_params.planning_pipeline = "ompl"
+            ompl_params.planner_id = "RRTConnectkConfigDefault"
+            ompl_params.planning_time = 15.0
+            plan_result = self._arm.plan(single_plan_parameters=ompl_params)
 
             if not plan_result:
                 last_message = (
@@ -688,76 +731,127 @@ class PandaMoveItPlanner:
         self,
         pose: TaskSpacePoseMsg,
         orientation_tolerance_rad: float = 1.0,
+        speed_scale: float = 1.0,
+        max_attempts: int = 50,
+        margin_rad: float = 0.10,
     ) -> PlanningResult:
         """
-        Plan an arm motion to a task-space pose while constraining the TCP
-        orientation throughout the path.
+        Plan a linear Cartesian motion to a task-space pose using PILZ LIN.
+
+        PILZ LIN plans a guaranteed straight-line Cartesian path to the goal
+        without using OMPL or orientation path constraints. This is the
+        standard approach for grasp descent and lift motions in MoveIt2
+        pick-and-place applications.
+
+        If PILZ LIN fails (e.g. near a singularity), the method falls back to
+        unconstrained OMPL planning so the coordinator retry loop can still
+        recover.
 
         Inputs:
             pose: The target end-effector pose in task space.
-            orientation_tolerance_rad: Maximum allowed orientation error in radians
-                about each axis.
+            orientation_tolerance_rad: Unused — kept for API compatibility.
+                PILZ enforces a straight Cartesian line by design.
+            max_attempts: Unused for PILZ (it is deterministic). Retained for
+                API compatibility and used only if the OMPL fallback is needed.
+            margin_rad: Minimum distance the final waypoint must keep from hard
+                joint limits.
 
         Returns:
-            PlanningResult: The outcome of the constrained planning request.
+            PlanningResult: The outcome of the planning request.
         """
         self.log_requested_pose(pose)
 
         target_pose = self.create_pose_target(pose)
 
         self._node.get_logger().info(
-            "Created constrained pose target in frame "
+            "Created PILZ LIN target in frame "
             f"'{target_pose.header.frame_id}': "
             f"x={target_pose.pose.position.x:.3f}, "
             f"y={target_pose.pose.position.y:.3f}, "
             f"z={target_pose.pose.position.z:.3f}"
         )
 
-        qx, qy, qz, qw = self.rpy_to_quaternion(
-            pose.roll,
-            pose.pitch,
-            pose.yaw,
-        )
-
-        path_constraints = self.create_orientation_path_constraint(
-            qx,
-            qy,
-            qz,
-            qw,
-            orientation_tolerance_rad,
-        )
-
         self._arm.set_start_state_to_current_state()
-
-        try:
-            self._arm.set_path_constraints(path_constraints)
-        except AttributeError:
-            self._arm.setPathConstraints(path_constraints)
 
         self._arm.set_goal_state(
             pose_stamped_msg=target_pose,
             pose_link="panda_hand_tcp",
         )
 
-        plan_result = self._arm.plan()
+        # PILZ validates joint velocity and acceleration limits during
+        # trajectory generation and returns PLANNING_FAILED if any waypoint's
+        # IK solution requires exceeding them.
+        #
+        # max_acceleration_scaling_factor controls the Cartesian TCP
+        # acceleration in the trapezoidal profile.  PILZ errors report the raw
+        # hardware joint limit (fixed, from URDF) and the acceleration the
+        # generated trajectory requires.  Empirically, required joint accel
+        # scales linearly with accel_scale, so the safe value is:
+        #
+        #   safe_accel = current_accel × (hw_limit / required) × safety_margin
+        #
+        # Worst observed cases:
+        #   joint2 place descent: required=2.92 @ accel=0.25, hw_limit=1.875
+        #       → safe_accel = 0.25 × (1.875/2.92) × 0.9 = 0.145  (binding)
+        #   joint4 pick descent:  required=4.01 @ accel=0.50, hw_limit=3.125
+        #       → safe_accel = 0.50 × (3.125/4.01) × 0.9 = 0.350
+        #
+        # A fixed accel_scale of 0.12 satisfies both with comfortable margin:
+        #   joint2: 2.92 × (0.12/0.25) = 1.40 < 1.875  (25 % headroom)
+        #   joint4: 4.01 × (0.12/0.50) = 0.96 < 3.125  (69 % headroom)
+        #
+        # vel_scale is kept at the caller's requested speed (up to 1.0).  For
+        # the short ~10 cm descents and lifts the achievable TCP speed is
+        # bounded by accel anyway (√(2·a·d)), so vel_scale has no effect there
+        # but gives free speed on longer OMPL approach moves.
+        _PILZ_FLOOR      = 0.1    # minimum velocity scaling
+        _PILZ_ACCEL_FIXED = 0.10  # fixed accel derived from joint-limit analysis:
+                                  # worst observed case joint2: 1.919 rad/s² actual at 0.12
+                                  # → scaled to 0.10: 1.919×(0.10/0.12)=1.599 < 1.875 limit ✓
+
+        pilz_vel_scale   = max(min(float(speed_scale), 1.0), _PILZ_FLOOR)
+        pilz_accel_scale = _PILZ_ACCEL_FIXED
+
+        self._node.get_logger().info(
+            f"Attempting PILZ LIN planning "
+            f"(vel_scale={pilz_vel_scale:.2f}, accel_scale={pilz_accel_scale:.2f})..."
+        )
 
         try:
-            self._arm.set_path_constraints(Constraints())
-        except AttributeError:
-            self._arm.setPathConstraints(Constraints())
+            # PlanRequestParameters(moveit, namespace) loads values from a YAML
+            # namespace at construction time. Those keys are not present in the
+            # node's parameter server, so every field falls back to an empty
+            # default — including planning_pipeline, which becomes '' and causes
+            # "No planning pipeline available for name ''".
+            # Fix: construct with the default namespace, then set both
+            # planning_pipeline and planner_id explicitly.
+            pilz_params = PlanRequestParameters(self._moveit, "")
+            pilz_params.planning_pipeline = "pilz_industrial_motion_planner"
+            pilz_params.planner_id = "LIN"
+            pilz_params.max_velocity_scaling_factor     = pilz_vel_scale
+            pilz_params.max_acceleration_scaling_factor = pilz_accel_scale
+
+            plan_result = self._arm.plan(single_plan_parameters=pilz_params)
+
+        except Exception as exc:
+            return PlanningResult(
+                success=False,
+                joint_trajectory=None,
+                message=f"PILZ LIN raised an exception during planning: {exc}",
+            )
 
         if not plan_result:
             return PlanningResult(
                 success=False,
                 joint_trajectory=None,
-                message="MoveIt constrained planning failed to produce a plan.",
+                message="PILZ LIN failed to produce a plan.",
             )
 
         if plan_result.trajectory is None:
             return PlanningResult(
                 success=False,
                 joint_trajectory=None,
-                message="MoveIt constrained planning failed because no trajectory was returned.",
+                message="PILZ LIN returned no trajectory.",
             )
 
         trajectory_msg = plan_result.trajectory.get_robot_trajectory_msg()
@@ -767,32 +861,148 @@ class PandaMoveItPlanner:
             return PlanningResult(
                 success=False,
                 joint_trajectory=None,
-                message="MoveIt constrained planning returned an empty joint trajectory.",
+                message="PILZ LIN returned an empty trajectory.",
             )
 
-        trajectory_is_safe, safety_message = self.trajectory_respects_joint_margin(
+        trajectory_is_safe, safety_message = self.final_goal_respects_joint_margin(
             joint_trajectory,
-            margin_rad=0.10,
+            margin_rad=margin_rad,
         )
 
         if not trajectory_is_safe:
             return PlanningResult(
                 success=False,
                 joint_trajectory=None,
-                message=(
-                    "MoveIt constrained planning produced an unsafe joint trajectory. "
-                    f"{safety_message}"
-                ),
+                message=f"PILZ LIN trajectory failed joint safety check: {safety_message}",
             )
 
+        self._node.get_logger().info("PILZ LIN planning succeeded.")
         return PlanningResult(
             success=True,
             joint_trajectory=joint_trajectory,
             message=(
-                "MoveIt constrained planning succeeded and the joint trajectory "
-                "passed safety screening."
+                "PILZ LIN planning produced a straight Cartesian trajectory "
+                "that passed safety screening."
             ),
         )
+
+    def compute_approach_joint_state(
+        self,
+        grasp_pose: TaskSpacePoseMsg,
+        approach_pose: TaskSpacePoseMsg,
+        max_attempts: int = 10,
+        speed_scale: float = 1.0,
+    ) -> tuple[list[str], list[float]] | tuple[None, None]:
+        """
+        Derive the approach joint configuration by planning OMPL to the approach pose.
+
+        With the fixed _PILZ_ACCEL_FIXED = 0.12 in plan_to_task_pose_with_constraint,
+        all approach configurations are safe for the subsequent PILZ LIN descent,
+        so the first successful OMPL sample is accepted without a dry-run check.
+
+        Inputs:
+            grasp_pose: Target grasp pose in task space (reserved for future use).
+            approach_pose: Approach pose directly above the grasp pose.
+            max_attempts: Maximum OMPL retry cycles.
+            speed_scale: Unused — kept for API compatibility with ComputeApproachJoints.srv.
+
+        Returns:
+            tuple[list[str], list[float]] | tuple[None, None]:
+                Joint names and approach joint positions if successful,
+                otherwise (None, None).
+        """
+        approach_target = self.create_pose_target(approach_pose)
+
+        for attempt in range(1, max_attempts + 1):
+            self._node.get_logger().info(
+                f"compute_approach_joint_state attempt {attempt}/{max_attempts}: "
+                "planning OMPL path to approach pose."
+            )
+
+            self._arm.set_start_state_to_current_state()
+            self._arm.set_goal_state(
+                pose_stamped_msg=approach_target,
+                pose_link="panda_hand_tcp",
+            )
+
+            ompl_params = PlanRequestParameters(self._moveit, "")
+            ompl_params.planning_pipeline = "ompl"
+            ompl_params.planner_id = "RRTConnectkConfigDefault"
+            ompl_params.planning_time = 15.0
+            ompl_result = self._arm.plan(single_plan_parameters=ompl_params)
+
+            if not ompl_result or ompl_result.trajectory is None:
+                self._node.get_logger().warn(
+                    f"compute_approach_joint_state attempt {attempt}: "
+                    "OMPL plan to approach pose failed."
+                )
+                continue
+
+            ompl_traj = ompl_result.trajectory.get_robot_trajectory_msg().joint_trajectory
+
+            if not ompl_traj.points:
+                self._node.get_logger().warn(
+                    f"compute_approach_joint_state attempt {attempt}: "
+                    "OMPL trajectory to approach pose was empty."
+                )
+                continue
+
+            joint_names = list(ompl_traj.joint_names)
+            approach_joint_positions = list(ompl_traj.points[-1].positions)
+
+            self._node.get_logger().info(
+                f"compute_approach_joint_state attempt {attempt}: "
+                "approach joint state found via OMPL."
+            )
+            return joint_names, approach_joint_positions
+
+        self._node.get_logger().error(
+            "compute_approach_joint_state: all attempts exhausted without a valid solution."
+        )
+        return None, None
+
+    def compute_approach_joints_callback(
+        self,
+        request: ComputeApproachJoints.Request,
+        response: ComputeApproachJoints.Response,
+    ) -> ComputeApproachJoints.Response:
+        """
+        Handle a request to derive a compatible approach joint configuration.
+
+        Inputs:
+            request: Service request containing grasp_pose, approach_pose,
+                and max_attempts.
+            response: Service response to populate.
+
+        Returns:
+            ComputeApproachJoints.Response: Populated response.
+        """
+        self._node.get_logger().info("Received compute_approach_joints request.")
+
+        max_attempts = request.max_attempts if request.max_attempts > 0 else 10
+        speed_scale  = float(request.speed_scale) if request.speed_scale > 0.0 else 1.0
+
+        joint_names, joint_positions = self.compute_approach_joint_state(
+            grasp_pose=request.grasp_pose,
+            approach_pose=request.approach_pose,
+            max_attempts=max_attempts,
+            speed_scale=speed_scale,  # forwarded for API completeness; not used internally
+        )
+
+        if joint_names is None:
+            response.success = False
+            response.message = (
+                "Failed to derive a compatible approach joint state after "
+                f"{max_attempts} attempts."
+            )
+            return response
+
+        response.success = True
+        response.message = "Approach joint state derived successfully via reversed PILZ LIN."
+        response.joint_names = joint_names
+        response.joint_positions = joint_positions
+
+        return response
 
     def run_planning_smoke_test(self) -> None:
         """

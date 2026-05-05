@@ -10,15 +10,24 @@ import time
 import threading
 
 from std_msgs.msg import String
+from sensor_msgs.msg import JointState
 
 from pick_place_robot.panda_arm_control import (
     ARM_JOINT_NAMES,
     HOME_JOINT_POSITIONS,
     PandaArmControl,
 )
-from pick_place_robot.panda_gripper_control import PandaGripperControl
+
+from pick_place_robot.panda_gripper_control import (
+    GRIPPER_MOVE_DURATION_SEC,
+    GRIPPER_OPEN_POSITION,
+    PandaGripperControl,
+)
+
 from pick_place_interfaces.srv import (
+    ComputeApproachJoints,
     ExecuteTaskPose,
+    MoveGripper,
     PlanToJointPositions,
     PlanToTaskPose,
     ExecuteHome,
@@ -67,6 +76,12 @@ class PandaCoordinatorNode(Node):
             "plan_to_joint_positions",
             callback_group=self._planner_client_callback_group,
         )
+
+        self._compute_approach_joints_client = self.create_client(
+            ComputeApproachJoints,
+            "compute_approach_joints",
+            callback_group=self._planner_client_callback_group,
+        )
         
         self._execute_task_pose_service = self.create_service(
             ExecuteTaskPose,
@@ -82,6 +97,13 @@ class PandaCoordinatorNode(Node):
             callback_group=self._service_callback_group,
         )
 
+        self._move_gripper_service = self.create_service(
+            MoveGripper,
+            "move_gripper",
+            self.move_gripper_callback,
+            callback_group=self._service_callback_group,
+        )
+
         self._arm = PandaArmControl(
             self,
             callback_group=self._arm_action_callback_group,
@@ -90,6 +112,19 @@ class PandaCoordinatorNode(Node):
         self._gripper = PandaGripperControl(
             self,
             callback_group=self._gripper_action_callback_group,
+        )
+
+        # Subscribe to joint states so we can log actual finger positions
+        # immediately before each gripper command.  This lets us confirm
+        # whether the fingers are already at the target position (which would
+        # explain "goal reached but no movement") or genuinely open when a
+        # close is commanded.
+        self._finger_positions: dict[str, float] = {}
+        self._joint_state_subscription = self.create_subscription(
+            JointState,
+            "/joint_states",
+            self._joint_state_callback,
+            10,
         )
 
         self._tf_buffer = Buffer()
@@ -107,6 +142,20 @@ class PandaCoordinatorNode(Node):
 
 
         self._is_ready = False
+
+    def _joint_state_callback(self, msg: JointState) -> None:
+        """
+        Cache the latest position for each finger joint from /joint_states.
+
+        Inputs:
+            msg: Latest joint state message.
+
+        Returns:
+            None
+        """
+        for name, position in zip(msg.name, msg.position):
+            if "finger" in name:
+                self._finger_positions[name] = position
 
     def publish_status(self) -> None:
         """
@@ -147,6 +196,18 @@ class PandaCoordinatorNode(Node):
         """
         arm_ready = self._arm.wait_for_server()
         gripper_ready = self._gripper.wait_for_server()
+        if arm_ready and gripper_ready:
+            # Allow the ros2_control hardware interfaces time to fully claim
+            # their joints after the action servers come up.  Gazebo runs at
+            # ~10 % real-time so the controller manager can still be settling
+            # joint ownership when the action server first reports available.
+            # Without this dwell, the first gripper trajectory is rejected with
+            # "Joints on incoming trajectory don't match the controller joints."
+            self.get_logger().info(
+                "Control servers ready — waiting 3 s for controller hardware "
+                "claim to settle before accepting requests."
+            )
+            time.sleep(3.0)
         return arm_ready and gripper_ready
     
     def is_ready(self) -> bool:
@@ -194,8 +255,9 @@ class PandaCoordinatorNode(Node):
         while rclpy.ok():
             task_pose_ready = self._plan_to_task_pose_client.wait_for_service(timeout_sec=1.0)
             joint_goal_ready = self._plan_to_joint_positions_client.wait_for_service(timeout_sec=1.0)
+            approach_joints_ready = self._compute_approach_joints_client.wait_for_service(timeout_sec=1.0)
 
-            if task_pose_ready and joint_goal_ready:
+            if task_pose_ready and joint_goal_ready and approach_joints_ready:
                 self.get_logger().info("Planner services are available.")
                 return True
 
@@ -406,22 +468,27 @@ class PandaCoordinatorNode(Node):
 
     def run_startup_sequence(self) -> bool:
         """
-        Run a simple first coordinated behavior:
-        move the arm home, open the gripper, then close the gripper.
+        Move the arm to the home joint configuration at node startup.
+
+        Uses an UNPLANNED direct joint command (move_home_unplanned) because
+        the arm is in a known-safe state at startup and MoveIt is not yet
+        fully initialised.  This is the ONLY place move_home_unplanned should
+        ever be called.  All post-startup homing must go through
+        plan_and_move_home() so that collision-aware path planning is active.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the full sequence succeeded, otherwise False.
+            bool: True if the home motion succeeded, otherwise False.
         """
-        self.get_logger().info("Starting coordinator motion sequence...")
+        self.get_logger().info("Starting coordinator startup sequence: moving to home...")
 
         if not self._arm.move_home_unplanned():
-            self.get_logger().error("Coordinator failed during arm home motion.")
+            self.get_logger().error("Coordinator failed during startup home motion.")
             return False
 
-        self.get_logger().info("Coordinator motion sequence completed successfully.")
+        self.get_logger().info("Coordinator startup sequence completed successfully.")
         return True
     
     def create_home_pose(self) -> TaskSpacePoseMsg:
@@ -591,15 +658,20 @@ class PandaCoordinatorNode(Node):
         pose: TaskSpacePoseMsg,
         use_orientation_constraint: bool = False,
         orientation_tolerance_rad: float = 1.0,
+        speed_scale: float = 1.0,
     ) -> PlanToTaskPose.Response | None:
         """
         Request a joint-trajectory plan for a task-space pose from the planner service.
 
         Inputs:
             pose: Target task-space pose message.
-            use_orientation_constraint: True to request constrained planning.
+            use_orientation_constraint: True to request PILZ LIN planning.
             orientation_tolerance_rad: Allowed orientation error in radians about
                 each axis when constrained planning is requested.
+            speed_scale: Velocity and acceleration scaling factor forwarded to the
+                planner. For PILZ LIN, scaling is applied at planning time because
+                PILZ validates joint velocity/acceleration limits during trajectory
+                generation. Passing a value < 1.0 prevents limit violations.
 
         Returns:
             PlanToTaskPose.Response | None: Service response if successful,
@@ -607,6 +679,7 @@ class PandaCoordinatorNode(Node):
         """
         request = PlanToTaskPose.Request()
         request.pose = pose
+        request.speed_scale = speed_scale
         request.use_orientation_constraint = use_orientation_constraint
         request.orientation_tolerance_rad = orientation_tolerance_rad
 
@@ -680,6 +753,156 @@ class PandaCoordinatorNode(Node):
 
         return response
     
+    def request_compute_approach_joints(
+        self,
+        grasp_pose: TaskSpacePoseMsg,
+        approach_pose: TaskSpacePoseMsg,
+        max_attempts: int = 10,
+        speed_scale: float = 1.0,
+    ) -> "ComputeApproachJoints.Response | None":
+        """
+        Ask the planner to derive an approach joint configuration that is
+        guaranteed to allow a PILZ LIN descent at the requested speed.
+
+        Inputs:
+            grasp_pose: Target grasp pose in task space.
+            approach_pose: Approach pose directly above the grasp pose.
+            max_attempts: Maximum OMPL + PILZ-dry-run retry cycles in the planner.
+            speed_scale: The speed at which the subsequent PILZ LIN descent will
+                be executed.  The planner performs a dry-run at this speed so
+                only configurations that pass the joint-limit check are returned.
+
+        Returns:
+            ComputeApproachJoints.Response | None:
+                Service response if successful, otherwise None.
+        """
+        request = ComputeApproachJoints.Request()
+        request.grasp_pose = grasp_pose
+        request.approach_pose = approach_pose
+        request.max_attempts = max_attempts
+        request.speed_scale = speed_scale
+
+        future = self._compute_approach_joints_client.call_async(request)
+
+        while rclpy.ok() and not future.done():
+            time.sleep(0.01)
+
+        if not future.done():
+            self.get_logger().warn(
+                "compute_approach_joints service call did not complete."
+            )
+            return None
+
+        if future.exception() is not None:
+            self.get_logger().error(
+                f"compute_approach_joints service call raised an exception: "
+                f"{future.exception()}"
+            )
+            return None
+
+        response = future.result()
+
+        if response is None:
+            self.get_logger().warn(
+                "compute_approach_joints service returned no response."
+            )
+            return None
+
+        return response
+
+    def plan_and_move_to_joint_positions(
+        self,
+        joint_names: list[str],
+        joint_positions: list[float],
+        speed_scale: float = 1.0,
+    ) -> tuple[bool, str]:
+        """
+        Plan and execute a motion to a joint-space target.
+
+        Plans up to _JOINT_LIMIT_REPLAN_ATTEMPTS times if OMPL returns a
+        trajectory whose final configuration lands any joint within
+        _JOINT_LIMIT_MARGIN_RAD of its limit.  The margin check prevents
+        subsequent constrained moves (PILZ LIN) from becoming infeasible
+        because the arm is cornered near a limit.
+
+        Inputs:
+            joint_names: Ordered list of joint names.
+            joint_positions: Ordered list of target joint positions in radians.
+            speed_scale: Motion speed scale factor for trajectory execution.
+
+        Returns:
+            tuple[bool, str]:
+                Success flag and descriptive result message.
+        """
+        for attempt_index in range(1, self._JOINT_LIMIT_REPLAN_ATTEMPTS + 1):
+            self.get_logger().info(
+                f"Joint-space planning attempt "
+                f"{attempt_index}/{self._JOINT_LIMIT_REPLAN_ATTEMPTS}."
+            )
+
+            response = self.request_plan_to_joint_positions(
+                joint_names=joint_names,
+                joint_positions=joint_positions,
+            )
+
+            if response is None:
+                return False, "No joint-space planning response was received."
+
+            self.get_logger().info(f"Joint-space planning success: {response.success}")
+            self.get_logger().info(f"Joint-space planning message: {response.message}")
+
+            if not response.success:
+                return False, f"Joint-space planning failed: {response.message}"
+
+            if not response.joint_trajectory.points:
+                return False, "Joint-space planning returned no joint trajectory."
+
+            # Inspect the final trajectory waypoint for joint-limit proximity.
+            traj_joint_names = list(response.joint_trajectory.joint_names)
+            final_positions = list(response.joint_trajectory.points[-1].positions)
+
+            near_limit, violating = self._check_joint_limit_clearances(
+                traj_joint_names,
+                final_positions,
+            )
+
+            if near_limit:
+                self.get_logger().warn(
+                    f"Joint-space plan rejected: joint(s) near limit: {violating}.  "
+                    f"Requesting a fresh OMPL sample "
+                    f"(attempt {attempt_index}/{self._JOINT_LIMIT_REPLAN_ATTEMPTS})."
+                )
+                if attempt_index < self._JOINT_LIMIT_REPLAN_ATTEMPTS:
+                    continue
+                return False, (
+                    f"Joint-space planning produced a near-limit configuration after "
+                    f"{self._JOINT_LIMIT_REPLAN_ATTEMPTS} attempts.  "
+                    f"Violating joints: {violating}."
+                )
+
+            # Configuration is acceptable — execute.
+            self.get_logger().info(
+                f"Joint-space plan accepted.  Executing trajectory with "
+                f"{len(response.joint_trajectory.points)} points."
+            )
+
+            motion_succeeded = self._arm.move_to_joint_trajectory(
+                response.joint_trajectory,
+                speed_scale=speed_scale,
+            )
+
+            if not motion_succeeded:
+                return False, "Arm motion to joint positions failed after successful planning."
+
+            time.sleep(self._post_motion_settle_time_sec)
+
+            return True, "Motion to joint positions succeeded."
+
+        return False, (
+            f"Joint-space planning exhausted all "
+            f"{self._JOINT_LIMIT_REPLAN_ATTEMPTS} replan attempts."
+        )
+
     def execute_pose_once(
         self,
         pose: TaskSpacePoseMsg,
@@ -841,8 +1064,27 @@ class PandaCoordinatorNode(Node):
                 self.get_logger().error(last_message)
                 continue
 
+            # Check the final trajectory configuration for joint-limit proximity
+            # before committing to execution.
+            traj_joint_names = list(response.joint_trajectory.joint_names)
+            final_positions = list(response.joint_trajectory.points[-1].positions)
+
+            near_limit, violating = self._check_joint_limit_clearances(
+                traj_joint_names,
+                final_positions,
+            )
+
+            if near_limit:
+                last_message = (
+                    f"OMPL plan rejected: joint(s) near limit: {violating}.  "
+                    f"Requesting a fresh sample."
+                )
+                last_failure_was_tolerance_only = False
+                self.get_logger().warn(last_message)
+                continue
+
             self.get_logger().info(
-                f"Executing planned joint trajectory with "
+                f"Joint-limit check passed.  Executing planned trajectory with "
                 f"{len(response.joint_trajectory.points)} points."
             )
 
@@ -993,16 +1235,37 @@ class PandaCoordinatorNode(Node):
         pose: TaskSpacePoseMsg,
         orientation_tolerance_rad: float = 1.0,
         speed_scale: float = 1.0,
+        approach_height_m: float = 0.0,
+        approach_only: bool = False,
     ) -> tuple[bool, str]:
         """
-        Request a constrained plan to a task-space pose, execute it, verify final
-        TCP pose, and replan a bounded number of times if needed.
+        Execute a straight-line Cartesian motion to a task-space pose using PILZ LIN.
+
+        When approach_height_m > 0 (used for grasp descents), a compatible approach
+        joint configuration is first derived by working backwards from the target pose:
+          1. Solve IK for the target (grasp) pose → grasp_joints.
+          2. Plan a reversed PILZ LIN from grasp_joints to the approach pose above it
+             → approach_joints (guaranteed on the same IK branch as the grasp).
+          3. Use OMPL to move to approach_joints (joint-space goal, no IK branch issue).
+          4. Execute a forward PILZ LIN to the target (grasp) pose.
+
+        When approach_height_m == 0 (used for lift motions), a PILZ LIN is executed
+        directly from the current robot state.
 
         Inputs:
             pose: The target end-effector pose in task space.
-            orientation_tolerance_rad: Maximum allowed orientation error in radians
-                about each axis during constrained planning.
+            orientation_tolerance_rad: Kept for API compatibility; PILZ LIN enforces
+                a straight Cartesian line by design.
             speed_scale: Motion speed scale factor for trajectory execution.
+            approach_height_m: Height in metres above the target pose at which the
+                approach joint configuration should be computed. Pass 0.0 to skip
+                approach planning (e.g. for lift motions).
+            approach_only: When True and approach_height_m > 0, execute only the
+                backward-IK + OMPL move to the approach pose and return immediately
+                without descending with PILZ LIN. The caller issues a follow-up call
+                with approach_height_m=0 to execute the PILZ LIN as a separate motion.
+                This splits the two executions so that ros2_control fully settles
+                between the OMPL stop and the PILZ start.
 
         Returns:
             tuple[bool, str]:
@@ -1011,25 +1274,81 @@ class PandaCoordinatorNode(Node):
         if not self.require_ready():
             return False, "Coordinator is not ready. Startup sequence is not complete."
 
-        last_message = "Constrained task-space motion did not complete successfully."
+        # --- Backward-IK approach phase (grasp descents only) ---
+        if approach_height_m > 0.0:
+            approach_pose = self.offset_pose_z(pose, approach_height_m)
+
+            self.get_logger().info(
+                f"Computing compatible approach joint state "
+                f"(approach_height_m={approach_height_m:.3f}m)."
+            )
+
+            approach_response = self.request_compute_approach_joints(
+                grasp_pose=pose,
+                approach_pose=approach_pose,
+                max_attempts=10,
+                speed_scale=speed_scale,
+            )
+
+            if approach_response is None or not approach_response.success:
+                failure_message = (
+                    "Failed to compute a compatible approach joint state. "
+                    + (approach_response.message if approach_response else "No response.")
+                )
+                self.get_logger().error(failure_message)
+                return False, failure_message
+
+            self.get_logger().info(
+                "Approach joint state derived. Moving to approach configuration via OMPL."
+            )
+
+            approach_succeeded, approach_message = self.plan_and_move_to_joint_positions(
+                joint_names=list(approach_response.joint_names),
+                joint_positions=list(approach_response.joint_positions),
+                speed_scale=speed_scale,
+            )
+
+            if not approach_succeeded:
+                failure_message = (
+                    f"Failed to reach approach joint configuration: {approach_message}"
+                )
+                self.get_logger().error(failure_message)
+                return False, failure_message
+
+            if approach_only:
+                # Caller will issue a separate PILZ LIN call once the gripper
+                # and any other pre-grasp steps are ready.  Returning here
+                # keeps the OMPL stop and the PILZ start as two independent
+                # ros2_control execution cycles.
+                success_message = (
+                    "Reached PILZ-compatible approach configuration via OMPL. "
+                    "PILZ LIN descent deferred to a follow-up call."
+                )
+                self.get_logger().info(success_message)
+                return True, success_message
+
+            self.get_logger().info(
+                "Reached approach joint configuration. "
+                "Executing PILZ LIN descent to target pose."
+            )
+
+        # --- PILZ LIN phase (descent from approach, or direct lift) ---
+        last_message = "PILZ LIN motion did not complete successfully."
 
         for attempt_index in range(1, self._task_pose_max_attempts + 1):
             self.get_logger().info(
-                f"Constrained task-space execution attempt "
-                f"{attempt_index}/{self._task_pose_max_attempts}."
+                f"PILZ LIN execution attempt {attempt_index}/{self._task_pose_max_attempts}."
             )
 
             response = self.request_plan_to_task_pose(
                 pose,
                 use_orientation_constraint=True,
                 orientation_tolerance_rad=orientation_tolerance_rad,
+                speed_scale=speed_scale,
             )
 
             if response is None:
-                last_message = (
-                    "Cannot execute constrained motion because no planning response "
-                    "was received."
-                )
+                last_message = "Cannot execute PILZ LIN motion: no planning response received."
                 self.get_logger().error(last_message)
                 continue
 
@@ -1037,20 +1356,17 @@ class PandaCoordinatorNode(Node):
             self.get_logger().info(f"Planning message: {response.message}")
 
             if not response.success:
-                last_message = "Cannot execute constrained motion because planning failed."
+                last_message = f"PILZ LIN planning failed: {response.message}"
                 self.get_logger().error(last_message)
                 continue
 
             if not response.joint_trajectory.points:
-                last_message = (
-                    "Cannot execute constrained motion because no joint trajectory "
-                    "was returned."
-                )
+                last_message = "PILZ LIN planning returned no joint trajectory."
                 self.get_logger().error(last_message)
                 continue
 
             self.get_logger().info(
-                f"Executing constrained joint trajectory with "
+                f"Executing PILZ LIN trajectory with "
                 f"{len(response.joint_trajectory.points)} points."
             )
 
@@ -1060,13 +1376,13 @@ class PandaCoordinatorNode(Node):
             )
 
             if not motion_succeeded:
-                last_message = "Arm motion failed after successful constrained planning."
+                last_message = "Arm motion failed after successful PILZ LIN planning."
                 self.get_logger().error(last_message)
                 continue
 
             time.sleep(self._post_motion_settle_time_sec)
 
-            reached_pose, verify_message, position_error_m, measured_orientation_error_rad = (
+            reached_pose, verify_message, position_error_m, orientation_error_rad = (
                 self.verify_task_pose_reached(
                     pose,
                     position_tolerance_m=self._task_pose_position_tolerance_m,
@@ -1076,40 +1392,36 @@ class PandaCoordinatorNode(Node):
 
             if reached_pose:
                 success_message = (
-                    "Constrained planned arm motion completed successfully and final TCP "
-                    "pose was within tolerance. "
-                    + verify_message
+                    "PILZ LIN motion completed successfully and final TCP pose was "
+                    "within tolerance. " + verify_message
                 )
                 self.get_logger().info(success_message)
                 return True, success_message
 
             last_message = (
-                "Constrained arm motion executed but final TCP pose was outside tolerance. "
+                "PILZ LIN motion executed but final TCP pose was outside tolerance. "
                 + verify_message
             )
             self.get_logger().warn(last_message)
 
             large_error_detected = (
                 position_error_m is not None
-                and measured_orientation_error_rad is not None
+                and orientation_error_rad is not None
                 and (
                     position_error_m > self._large_position_error_abort_m
-                    or measured_orientation_error_rad > self._large_orientation_error_abort_rad
+                    or orientation_error_rad > self._large_orientation_error_abort_rad
                 )
             )
 
             if large_error_detected:
                 abort_message = (
-                    "Aborting constrained-motion retries because final TCP error was too "
-                    "large for a safe replan. "
-                    + verify_message
+                    "Aborting PILZ LIN retries due to large TCP error. " + verify_message
                 )
                 self.get_logger().error(abort_message)
                 return False, abort_message
 
         failure_message = (
-            f"Constrained task-space motion failed after "
-            f"{self._task_pose_max_attempts} attempts. "
+            f"PILZ LIN motion failed after {self._task_pose_max_attempts} attempts. "
             + last_message
         )
         self.get_logger().error(failure_message)
@@ -1184,10 +1496,25 @@ class PandaCoordinatorNode(Node):
             f"speed_scale={request.speed_scale:.3f}"
         )
 
-        success, message = self.plan_and_move_to_pose(
-            request.pose,
-            speed_scale=request.speed_scale,
-        )
+        if request.use_orientation_constraint:
+            self.get_logger().info(
+                f"Using PILZ LIN with orientation constraint, tolerance="
+                f"{request.orientation_tolerance_rad:.3f} rad, "
+                f"approach_height_m={request.approach_height_m:.3f}m, "
+                f"approach_only={request.approach_only}."
+            )
+            success, message = self.plan_and_move_to_pose_with_orientation_constraint(
+                request.pose,
+                orientation_tolerance_rad=request.orientation_tolerance_rad,
+                speed_scale=request.speed_scale,
+                approach_height_m=request.approach_height_m,
+                approach_only=request.approach_only,
+            )
+        else:
+            success, message = self.plan_and_move_to_pose(
+                request.pose,
+                speed_scale=request.speed_scale,
+            )
 
         response.success = success
         response.message = message
@@ -1196,6 +1523,244 @@ class PandaCoordinatorNode(Node):
             f"execute_task_pose returning: success={response.success}, message='{response.message}'"
         )
 
+        return response
+    
+    # Tolerance used when verifying that each finger reached its target after
+    # a gripper command.  Any finger further than this from the target triggers
+    # an automatic retry.
+    # 10 mm accommodates the case where joint2 is pinned at the 0.040 m hard
+    # limit after an asymmetric place (off-centre grasp pushes it to the upper
+    # stop) but the open target is 0.034 m — a 6 mm gap that falls inside this
+    # tolerance so the place-open is not falsely retried to exhaustion.
+    # Grasp closes always use the separate grasp_tolerance_m path so the wider
+    # default does not affect pick reliability.
+    _GRIPPER_REACH_TOLERANCE_M = 0.010
+
+    # Maximum number of combined-trajectory retry cycles for the gripper.
+    # The JTC reports success when the trajectory duration elapses, not when
+    # the joints physically reach the target.  In Gazebo, gz_ros2_control can
+    # silently drop a position command for one joint during a given physics
+    # step.  Retrying the same combined two-joint trajectory with a fresh
+    # start_positions waypoint usually succeeds within a few attempts.
+    _GRIPPER_MAX_RETRIES = 5
+
+    # ── Joint-limit proximity guard ───────────────────────────────────────────
+    # Position limits for each Panda arm joint, taken directly from
+    # panda.urdf.xacro <limit> tags (lower, upper) in radians.
+    _ARM_JOINT_LIMITS: dict[str, tuple[float, float]] = {
+        "panda_joint1": (-2.897246558310587,    2.897246558310587),
+        "panda_joint2": (-1.7627825445142729,   1.7627825445142729),
+        "panda_joint3": (-2.897246558310587,    2.897246558310587),
+        "panda_joint4": (-3.07177948351002,    -0.06981317007977318),
+        "panda_joint5": (-2.897246558310587,    2.897246558310587),
+        "panda_joint6": (-0.017453292519943295,  3.752457891787808),
+        "panda_joint7": (-2.897246558310587,    2.897246558310587),
+    }
+
+    # Minimum clearance (radians) from any joint limit that a planned
+    # trajectory's final configuration must have before execution is permitted.
+    # 10 ° gives PILZ LIN and subsequent arm moves enough headroom to stay
+    # feasible without meaningfully restricting the reachable workspace.
+    _JOINT_LIMIT_MARGIN_RAD: float = math.radians(10.0)
+
+    # Number of times to ask OMPL for a new plan when the previous one lands
+    # a joint too close to its limit.  OMPL is non-deterministic, so a fresh
+    # sample usually finds a better configuration within a couple of retries.
+    _JOINT_LIMIT_REPLAN_ATTEMPTS: int = 3
+
+    def _fingers_at_target(
+        self,
+        target_position: float,
+        tolerance_m: float | None = None,
+    ) -> bool:
+        """
+        Return True if every tracked finger joint is within tolerance of
+        target_position.
+
+        Inputs:
+            target_position: Expected per-finger position in metres.
+            tolerance_m: Position tolerance in metres.  Defaults to
+                _GRIPPER_REACH_TOLERANCE_M (5 mm) when None.  Pass a larger
+                value when closing on an object so the fingers stopping at the
+                object surface (not at 0.0 m) does not trigger a false retry.
+
+        Returns:
+            bool: True if all fingers are close enough to the target.
+        """
+        if not self._finger_positions:
+            # No data yet — assume OK to avoid blocking startup.
+            return True
+
+        effective_tolerance = (
+            tolerance_m if tolerance_m is not None else self._GRIPPER_REACH_TOLERANCE_M
+        )
+
+        for name, position in self._finger_positions.items():
+            if abs(position - target_position) > effective_tolerance:
+                self.get_logger().warn(
+                    f"Finger '{name}' is at {position:.4f}m but target is "
+                    f"{target_position:.4f}m "
+                    f"(error={abs(position - target_position):.4f}m > "
+                    f"tolerance={effective_tolerance:.4f}m)."
+                )
+                return False
+
+        return True
+
+    def _check_joint_limit_clearances(
+        self,
+        joint_names: list[str],
+        joint_positions: list[float],
+    ) -> tuple[bool, list[str]]:
+        """
+        Check whether any arm joint in the given configuration is within
+        _JOINT_LIMIT_MARGIN_RAD of its position limit.
+
+        Inputs:
+            joint_names: Names of the joints in the trajectory.
+            joint_positions: Corresponding positions in radians.
+
+        Returns:
+            tuple[bool, list[str]]:
+                (any_near_limit, list_of_violating_joint_names)
+        """
+        violating: list[str] = []
+        for name, position in zip(joint_names, joint_positions):
+            if name not in self._ARM_JOINT_LIMITS:
+                continue
+            lower, upper = self._ARM_JOINT_LIMITS[name]
+            if min(position - lower, upper - position) < self._JOINT_LIMIT_MARGIN_RAD:
+                violating.append(name)
+        return len(violating) > 0, violating
+
+    def move_gripper_callback(
+        self,
+        request: MoveGripper.Request,
+        response: MoveGripper.Response,
+    ) -> MoveGripper.Response:
+        """
+        Move the gripper to a requested finger separation width, with automatic
+        retry when Gazebo silently ignores one finger joint's command.
+
+        The requested width_m is the total gap between fingers. It is
+        divided by two to get the per-finger position that the gripper
+        controller expects.
+
+        Inputs:
+            request: MoveGripper service request containing width_m.
+            response: Service response to populate.
+
+        Returns:
+            MoveGripper.Response: Populated result.
+        """
+        if not self.require_ready():
+            response.success = False
+            response.message = "Coordinator is not ready. Startup sequence is not complete."
+            return response
+
+        max_width_m = GRIPPER_OPEN_POSITION * 2.0
+
+        if request.width_m < 0.0 or request.width_m > max_width_m:
+            response.success = False
+            response.message = (
+                f"Requested gripper width {request.width_m:.4f}m is outside the "
+                f"valid range [0.0, {max_width_m:.4f}]m."
+            )
+            self.get_logger().warn(response.message)
+            return response
+
+        finger_position = request.width_m / 2.0
+
+        # When the caller supplies an expected object width, the fingers will
+        # stop at the object surface rather than 0.0 m.  Use a tolerance that
+        # accepts any position between 0.0 m and (half-width + margin) so both
+        # the JTC goal check and our own post-motion verify pass cleanly.
+        # When no object is expected (open, empty close, diagnostics) keep the
+        # tight 5 mm default so real positioning errors are still caught.
+        _GRASP_TOLERANCE_MARGIN_M = 0.005  # 5 mm margin above object half-width
+        if request.expected_object_width_m > 0.0:
+            grasp_tolerance_m = (
+                request.expected_object_width_m / 2.0 + _GRASP_TOLERANCE_MARGIN_M
+            )
+            self.get_logger().info(
+                f"Grasping object: expected_width={request.expected_object_width_m:.4f}m "
+                f"→ per-finger JTC tolerance={grasp_tolerance_m:.4f}m"
+            )
+        else:
+            grasp_tolerance_m = None  # use tight controller default
+
+        for attempt in range(1, self._GRIPPER_MAX_RETRIES + 1):
+            # Log actual finger positions before every attempt so we can see
+            # whether the fingers are already at the target or need to move.
+            if self._finger_positions:
+                positions_str = ", ".join(
+                    f"{n}={v:.4f}m" for n, v in sorted(self._finger_positions.items())
+                )
+                self.get_logger().info(
+                    f"Gripper attempt {attempt}/{self._GRIPPER_MAX_RETRIES} — "
+                    f"finger positions: [{positions_str}] "
+                    f"→ target={finger_position:.4f}m"
+                )
+            else:
+                self.get_logger().warn(
+                    f"Gripper attempt {attempt}/{self._GRIPPER_MAX_RETRIES} — "
+                    "no finger joint state data yet."
+                )
+
+            # Prepend an explicit t=0 waypoint using the actual joint positions
+            # so the JTC does not need to sample hardware state itself, which
+            # eliminates the service-callback timing race condition.
+            start_positions: list[float] | None = None
+            j1 = self._finger_positions.get("panda_finger_joint1")
+            j2 = self._finger_positions.get("panda_finger_joint2")
+            if j1 is not None and j2 is not None:
+                start_positions = [j1, j2]
+
+            action_success = self._gripper.move_to_position(
+                finger_position,
+                GRIPPER_MOVE_DURATION_SEC,
+                start_positions=start_positions,
+                goal_tolerance_m=grasp_tolerance_m,
+            )
+
+            if not action_success:
+                response.success = False
+                response.message = (
+                    f"Gripper action failed on attempt {attempt} "
+                    f"for target width={request.width_m:.4f}m."
+                )
+                self.get_logger().error(response.message)
+                return response
+
+            # Verify that every finger actually reached the target.  The JTC
+            # reports success based on trajectory time expiry (goal_tolerance is
+            # not configured for non-grasp moves), so "success" does not
+            # guarantee physical movement.  A Gazebo/gz_ros2_control race
+            # condition can cause one joint to silently ignore the commanded
+            # trajectory for that execution cycle.
+            # For grasp moves the same tolerance is used so fingers stopping
+            # against an object surface pass without triggering a false retry.
+            if self._fingers_at_target(finger_position, tolerance_m=grasp_tolerance_m):
+                response.success = True
+                response.message = (
+                    f"Gripper reached width={request.width_m:.4f}m "
+                    f"on attempt {attempt}."
+                )
+                self.get_logger().info(response.message)
+                return response
+
+            self.get_logger().warn(
+                f"Gripper action reported success on attempt {attempt} but "
+                f"one or more fingers did not reach target {finger_position:.4f}m. "
+                f"Retrying."
+            )
+
+        response.success = False
+        response.message = (
+            f"Gripper failed to reach width={request.width_m:.4f}m after "
+            f"{self._GRIPPER_MAX_RETRIES} attempts."
+        )
+        self.get_logger().error(response.message)
         return response
 
 def main(args=None):

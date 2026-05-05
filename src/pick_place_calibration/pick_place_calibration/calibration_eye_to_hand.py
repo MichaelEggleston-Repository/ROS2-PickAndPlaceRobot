@@ -1,10 +1,16 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from pathlib import Path
+import math
 
 from pick_place_calibration.calibration_pose_sweep import CalibrationPoseSweep
 from pick_place_calibration.calibration_data_collection import CalibrationDataCollection
-
+from pick_place_calibration.apriltag_target_detection import AprilTagTargetDetection
+from pick_place_calibration.compute_eye_to_hand_calibration import (
+    compute_eye_to_hand_calibration,
+    save_eye_to_hand_calibration_result,
+)
 
 class CalibrationHandToEyeNode(Node):
     """
@@ -104,15 +110,98 @@ class CalibrationHandToEyeNode(Node):
         )
         return True
 
-    def run_calibration_sequence(self) -> bool:
+    def get_current_session_dir(self) -> Path:
         """
-        Run the ordered hand-to-eye calibration movement and capture sequence.
+        Return the current calibration session directory.
 
         Inputs:
             None
 
         Returns:
-            bool: True if the sequence completed, otherwise False.
+            Path: Current session directory path.
+        """
+        return self._data_collection.get_current_session_dir()
+    
+    def run_eye_to_hand_post_processing(
+        self,
+        session_dir: Path,
+    ) -> bool:
+        """
+        Run AprilTag detection, compute eye-to-hand calibration, and save the result.
+
+        Inputs:
+            session_dir: Path to the completed calibration session directory.
+
+        Returns:
+            bool: True if post-processing succeeded, otherwise False.
+        """
+        try:
+            self.get_logger().info(
+                f"Running AprilTag detection for calibration session: {session_dir}"
+            )
+
+            detector = AprilTagTargetDetection()
+            detection_results = detector.detect_session(session_dir=session_dir)
+
+            detected_count = sum(1 for result in detection_results if result.detected)
+            self.get_logger().info(
+                f"AprilTag detection complete: {detected_count}/{len(detection_results)} images detected."
+            )
+
+            if detected_count == 0:
+                self.get_logger().error(
+                    "Eye-to-hand post-processing failed because no tags were detected."
+                )
+                return False
+
+            self.get_logger().info("Computing eye-to-hand calibration transform.")
+
+            calibration_result = compute_eye_to_hand_calibration(
+                session_dir=session_dir,
+                tool_to_tag_translation_m=[0.0, 0.0, 0.013],
+                tool_to_tag_rpy_radians=[0.0, 0.0, math.pi],
+            )
+
+            output_path = session_dir / "eye_to_hand_calibration.yaml"
+            save_eye_to_hand_calibration_result(
+                result=calibration_result,
+                output_path=output_path,
+            )
+
+            self.get_logger().info(
+                "Eye-to-hand calibration complete. "
+                f"Saved result to: {output_path}"
+            )
+            self.get_logger().info(
+                "Final base_to_camera translation_m="
+                f"[{calibration_result.mean_translation_m[0]:.6f}, "
+                f"{calibration_result.mean_translation_m[1]:.6f}, "
+                f"{calibration_result.mean_translation_m[2]:.6f}]"
+            )
+            self.get_logger().info(
+                "Final base_to_camera rpy_rad="
+                f"[{calibration_result.mean_rpy_radians[0]:.6f}, "
+                f"{calibration_result.mean_rpy_radians[1]:.6f}, "
+                f"{calibration_result.mean_rpy_radians[2]:.6f}]"
+            )
+            return True
+
+        except Exception as error:
+            self.get_logger().error(
+                f"Eye-to-hand post-processing failed: {error}"
+            )
+            return False
+
+    def run_calibration_sequence(self) -> bool:
+        """
+        Run the ordered hand-to-eye calibration movement, capture sequence,
+        final home move, and eye-to-hand post-processing.
+
+        Inputs:
+            None
+
+        Returns:
+            bool: True if the full calibration workflow completed, otherwise False.
         """
         sequence = self._pose_sweep.get_calibration_sequence()
 
@@ -129,6 +218,7 @@ class CalibrationHandToEyeNode(Node):
         successful_captures = 0
         attempted_image_poses = 0
         sequence_succeeded = False
+        home_succeeded = False
 
         try:
             for index, step in enumerate(sequence, start=1):
@@ -141,7 +231,7 @@ class CalibrationHandToEyeNode(Node):
 
                 motion_succeeded = self._pose_sweep.move_to_sequence_step(
                     step,
-                    speed_scale=1.0,
+                    speed_scale=0.75,
                 )
 
                 if not motion_succeeded:
@@ -173,7 +263,6 @@ class CalibrationHandToEyeNode(Node):
                 f"{successful_captures}/{attempted_image_poses} image captures succeeded."
             )
             sequence_succeeded = True
-            return True
 
         finally:
             self.get_logger().info(
@@ -195,6 +284,36 @@ class CalibrationHandToEyeNode(Node):
                     "Robot returned home after calibration sequence ended early."
                 )
 
+        if not sequence_succeeded:
+            self.get_logger().error(
+                "Hand-to-eye calibration sequence failed before post-processing."
+            )
+            return False
+
+        if not home_succeeded:
+            self.get_logger().error(
+                "Hand-to-eye calibration post-processing will not run because the robot failed to return home."
+            )
+            return False
+
+        session_dir = self._data_collection.get_current_session_dir()
+
+        self.get_logger().info(
+            f"Starting eye-to-hand post-processing for session: {session_dir}"
+        )
+
+        post_processing_succeeded = self.run_eye_to_hand_post_processing(session_dir)
+
+        if not post_processing_succeeded:
+            self.get_logger().error(
+                "Calibration image capture succeeded, but eye-to-hand post-processing failed."
+            )
+            return False
+
+        self.get_logger().info(
+            "Hand-to-eye calibration workflow completed successfully."
+        )
+        return True
 
 def main(args=None) -> None:
     """

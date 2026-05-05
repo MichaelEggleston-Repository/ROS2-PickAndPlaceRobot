@@ -130,9 +130,17 @@ def build_moveit_config_dict(
         "robot_description": robot_description,
         "robot_description_semantic": robot_description_semantic,
         "robot_description_kinematics": robot_description_kinematics,
-        "robot_description_planning": joint_limits,
+        "robot_description_planning": {
+            **joint_limits,
+            "cartesian_limits": {
+                "max_trans_vel": 1.0,
+                "max_trans_acc": 2.25,
+                "max_trans_dec": -5.0,
+                "max_rot_vel": 1.57,
+            },
+        },
         "planning_pipelines": {
-            "pipeline_names": ["ompl"],
+            "pipeline_names": ["ompl", "pilz_industrial_motion_planner"],
         },
         "default_planning_pipeline": "ompl",
         "plan_request_params": {
@@ -159,6 +167,20 @@ def build_moveit_config_dict(
             ],
             "start_state_max_bounds_error": 0.31416,
             **ompl_planning,
+        },
+        "pilz_industrial_motion_planner": {
+            "planning_plugins": ["pilz_industrial_motion_planner/CommandPlanner"],
+            "request_adapters": [
+                "default_planning_request_adapters/ResolveConstraintFrames",
+                "default_planning_request_adapters/ValidateWorkspaceBounds",
+                "default_planning_request_adapters/CheckStartStateBounds",
+                "default_planning_request_adapters/CheckStartStateCollision",
+            ],
+            "response_adapters": [
+                "default_planning_response_adapters/AddTimeOptimalParameterization",
+                "default_planning_response_adapters/ValidateSolution",
+                "default_planning_response_adapters/DisplayMotionPath",
+            ],
         },
         "publish_planning_scene": True,
         "publish_geometry_updates": True,

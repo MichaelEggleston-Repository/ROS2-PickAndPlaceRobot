@@ -1,0 +1,14 @@
+# Target total gap between fingers in metres.
+# Valid range: 0.0 (fully closed) to 0.08 (fully open).
+float64 width_m
+
+# Expected width of the object being grasped, in metres.
+# Set to 0.0 when no object is expected (open, empty close, diagnostics) — the
+# controller will use a tight 5 mm position tolerance so any slop is caught.
+# Set to the detected object width when grasping so the controller accepts the
+# fingers stopping against the object surface rather than reaching 0.0 m.
+# The per-finger tolerance sent to the JTC is:  (expected_object_width_m / 2) + 5 mm margin.
+float64 expected_object_width_m
+---
+bool success
+string message
